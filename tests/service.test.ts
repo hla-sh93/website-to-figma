@@ -260,6 +260,12 @@ test('job retry is idempotent, returns validated scene, and detects key conflict
     }
     const result = await fetch(app.url + '/jobs/' + first.id + '/scene', { headers });
     assert.equal(result.status, 200);
+    const full = (await result.clone().json()) as ScenePackage;
+    const slim = (await (
+      await fetch(app.url + '/jobs/' + first.id + '/scene?screenshots=0', { headers })
+    ).json()) as ScenePackage;
+    assert.equal(slim.screens.length, full.screens.length);
+    assert.ok(slim.screens.every((screen) => screen.screenshot === undefined));
     assert.equal(runs, 1);
     assert.equal(
       (

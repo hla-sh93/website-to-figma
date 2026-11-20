@@ -70,3 +70,36 @@ export function pageFingerprint(): string {
     }),
   ]);
 }
+
+/**
+ * Freezes motion after the page has loaded, scrolled and decoded: finishes
+ * finite CSS/Web animations at their end state, pauses infinite ones, clears
+ * pending timers and stops new animation frames and intervals. setTimeout
+ * stays available for the capture's own scripts.
+ */
+export function freezePage(): void {
+  const w = window as Window & { __figmaFrozen?: boolean };
+  if (w.__figmaFrozen) return;
+  w.__figmaFrozen = true;
+  for (const animation of document.getAnimations()) {
+    try {
+      const timing = animation.effect?.getComputedTiming();
+      if (timing && Number.isFinite(timing.endTime as number)) animation.finish();
+      else animation.pause();
+    } catch {
+      try {
+        animation.pause();
+      } catch {}
+    }
+  }
+  const last = setTimeout(() => {}, 0) as unknown as number;
+  for (let id = 0; id <= last; id++) {
+    clearTimeout(id);
+    clearInterval(id);
+  }
+  w.requestAnimationFrame = () => 0;
+  w.setInterval = (() => 0) as unknown as typeof setInterval;
+  for (const video of document.querySelectorAll('video')) video.pause();
+  for (const marquee of document.querySelectorAll('marquee'))
+    (marquee as HTMLElement & { stop?: () => void }).stop?.();
+}

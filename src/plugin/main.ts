@@ -1,10 +1,13 @@
 import { validateScene, type ScenePackage } from '../core/scene.js';
 import { flatten } from '../core/analysis.js';
 import { renderScene, preflightFonts, type RenderResult } from './renderer.js';
+import { validateFontRequests } from './fonts.js';
 import { installedPairingKey, installedVerificationUrl } from './connection.js';
 import { errorMessage } from './errors.js';
 import { verifyNativeResult } from '../../tests/native-validation.js';
 declare const __html__: string;
+/** Replaced at build time: false for the shipped plugin, true for the diagnostic build. */
+declare const __DIAGNOSTICS__: boolean;
 figma.showUI(__html__, { width: 400, height: 510, themeColors: true });
 let current: ScenePackage | undefined,
   result: RenderResult | undefined,
@@ -48,10 +51,9 @@ figma.ui.onmessage = async (message: unknown) => {
       return;
     }
     if (data.type === 'PREFLIGHT') {
-      const scene = validateScene(data.scene);
       const fonts = await preflightFonts(
         figma,
-        scene,
+        validateFontRequests(data.fonts),
         typeof data.fallback === 'string' ? data.fallback : undefined,
       );
       post('PREFLIGHT_RESULT', {
@@ -67,10 +69,8 @@ figma.ui.onmessage = async (message: unknown) => {
       cancelled = false;
       try {
         const scene = validateScene(data.scene);
-        if (installedVerificationUrl()) {
-          const pageName = /^https:\/\/www\.amazon\.co\.uk\/?$/.test(installedVerificationUrl())
-            ? 'فحص Home — Amazon'
-            : 'Website capture verification';
+        if (__DIAGNOSTICS__ && installedVerificationUrl()) {
+          const pageName = 'Website capture verification';
           const page = figma.root.children.find((p) => p.name === pageName) ?? figma.createPage();
           page.name = pageName;
           await figma.setCurrentPageAsync(page);
@@ -80,6 +80,7 @@ figma.ui.onmessage = async (message: unknown) => {
           fontPolicy: data.allowSubstitution === true ? 'substitute' : 'stop',
           fallbackFamily: typeof data.fallback === 'string' ? data.fallback : undefined,
           foundations: data.foundations !== false,
+          validated: true,
           isCancelled: () => cancelled,
           onProgress: (done, total) => {
             if (done - last >= 15 || done === total) {
@@ -90,7 +91,7 @@ figma.ui.onmessage = async (message: unknown) => {
         });
         current = scene;
         result = next;
-        if (installedVerificationUrl() === 'fixture:features') {
+        if (__DIAGNOSTICS__ && installedVerificationUrl() === 'fixture:features') {
           try {
             const verified = await verifyNativeResult(figma, scene, next);
             post('NATIVE_FUNCTIONAL', {
@@ -124,7 +125,7 @@ figma.ui.onmessage = async (message: unknown) => {
       }
       return;
     }
-    if (data.type === 'VERIFY_PREVIEW') {
+    if (__DIAGNOSTICS__ && data.type === 'VERIFY_PREVIEW') {
       if (busy || !current || !result) throw new Error('Import not available for native preview.');
       const root = await figma.getNodeByIdAsync(result.screenIds[0]!);
       if (!root || !('exportAsync' in root) || !('absoluteTransform' in root))
@@ -206,7 +207,7 @@ figma.ui.onmessage = async (message: unknown) => {
       });
       return;
     }
-    if (data.type === 'VERIFY') {
+    if (__DIAGNOSTICS__ && data.type === 'VERIFY') {
       if (busy || !current || !result || typeof data.screenId !== 'string')
         throw new Error('Import a capture before checking it.');
       const index = current.screens.findIndex((s) => s.id === data.screenId);

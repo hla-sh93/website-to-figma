@@ -3,9 +3,9 @@ import {
   type Layout,
   type ScenePackage,
   type SceneNode,
-  type TextSpec,
   type RGBA,
 } from '../core/scene.js';
+import { blurEffect, colorName, gradientPaint, shadowEffect, utf8Decode } from './paint.js';
 import { createComponents } from './components.js';
 import { computeImagePlacement } from '../core/image.js';
 import { errorMessage } from './errors.js';
@@ -16,11 +16,12 @@ import {
   fontLabel,
   normalizeFamily,
   splitFontFamilies,
+  collectFontRequests,
   type FontFace,
   type FontResolution,
   type FontRequest,
 } from './fonts.js';
-export { resolveFont } from './fonts.js';
+export { resolveFont, collectFontRequests } from './fonts.js';
 export type { FontFace, FontResolution } from './fonts.js';
 
 type NativeNode = FrameNode | TextNode | RectangleNode;
@@ -30,6 +31,8 @@ export type RenderOptions = {
   foundations?: boolean;
   components?: boolean;
   metadata?: boolean;
+  /** Set when the caller already ran validateScene on this exact object. */
+  validated?: boolean;
   isCancelled?: () => boolean;
   onProgress?: (done: number, total: number) => void;
 };
@@ -61,7 +64,8 @@ export function captureHost(url: string): string {
         .replace(/[^a-zA-Z0-9.:[\]-]/g, '')
     : 'Owned fixture';
 }
-export function decodeBase64(value: string): Uint8Array {
+export function decodeBase64(value: string, api?: Pick<PluginAPI, 'base64Decode'>): Uint8Array {
+  if (api && typeof api.base64Decode === 'function') return api.base64Decode(value);
   if (!value || value.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value))
     throw new Error('Invalid base64 asset.');
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -156,17 +160,15 @@ function allNodes(pkg: ScenePackage): SceneNode[] {
 }
 const rgb = ({ r, g, b }: RGBA) => ({ r, g, b });
 const solid = (c: RGBA): SolidPaint => ({ type: 'SOLID', color: rgb(c), opacity: c.a });
-export async function preflightFonts(api: PluginAPI, pkg: ScenePackage, fallback = 'Inter') {
+export async function preflightFonts(
+  api: PluginAPI,
+  input: ScenePackage | FontRequest[],
+  fallback = 'Inter',
+) {
   const available = (await api.listAvailableFontsAsync()).map((f) => f.fontName);
   const requests = new Map<string, FontRequest>();
-  for (const node of allNodes(pkg)) {
-    if (!node.text) continue;
-    requests.set(fontKey(node.text), fontRequest(node.text));
-    for (const run of node.text.runs ?? []) {
-      const request = fontRequest(node.text, run);
-      requests.set(fontKey(request), request);
-    }
-  }
+  for (const request of Array.isArray(input) ? input : collectFontRequests(input))
+    requests.set(fontKey(request), request);
   const wanted = new Set(
     [...requests.values()]
       .flatMap((request) => [
@@ -212,7 +214,7 @@ export async function renderScene(
   input: unknown,
   options: RenderOptions = {},
 ): Promise<RenderResult> {
-  const pkg = validateScene(input);
+  const pkg = options.validated ? (input as ScenePackage) : validateScene(input);
   const check = () => {
     if (options.isCancelled?.()) throw new Error('Import cancelled.');
   };
@@ -267,11 +269,7 @@ export async function renderScene(
     const key = [c.r, c.g, c.b, c.a].map((v) => v.toFixed(5)).join('/');
     let variable = colors.get(key);
     if (!variable) {
-      variable = api.variables.createVariable(
-        `color/observed-${colors.size + 1}`,
-        collection,
-        'COLOR',
-      );
+      variable = api.variables.createVariable(`color/${colorName(c)}`, collection, 'COLOR');
       variable.scopes = ['FRAME_FILL', 'SHAPE_FILL', 'TEXT_FILL', 'STROKE_COLOR'];
       variable.setValueForMode(collection.defaultModeId, c);
       colors.set(key, variable);
@@ -279,6 +277,21 @@ export async function renderScene(
       stats.variables++;
     }
     result = api.variables.setBoundVariableForPaint(result, 'color', variable);
+    return result;
+  };
+  const gradientFills = (source: SceneNode): Paint[] => {
+    const result: Paint[] = [];
+    for (const gradient of [...(source.style.gradients ?? [])].reverse()) {
+      try {
+        result.push(gradientPaint(gradient, source.bounds.width, source.bounds.height));
+      } catch {
+        issues.push({
+          code: 'GRADIENT_SKIPPED',
+          message: 'A degenerate CSS gradient could not be drawn.',
+          sourceId: source.id,
+        });
+      }
+    }
     return result;
   };
   const bindNumber = (
@@ -290,14 +303,16 @@ export async function renderScene(
     if (options.foundations === false) return;
     collection ??= api.variables.createVariableCollection(`${prefix} / Foundations`);
     if (!cleanup.includes(collection)) cleanup.push(collection);
+    value = Math.round(value * 100) / 100;
+    node[field] = value;
     let variable = numbers.get(value);
     if (!variable) {
       variable = api.variables.createVariable(
-        `space/observed-${String(value).replace('.', '_')}`,
+        `space/${String(Math.round(value * 100) / 100).replace('.', '_')}`,
         collection,
         'FLOAT',
       );
-      variable.scopes = ['GAP'];
+      variable.scopes = ['GAP', 'WIDTH_HEIGHT'];
       variable.setValueForMode(collection.defaultModeId, value);
       numbers.set(value, variable);
       cleanup.push(variable);
@@ -305,8 +320,22 @@ export async function renderScene(
     }
     node.setBoundVariable(field, variable);
   };
-  let done = 0;
+  let done = 0,
+    lastYield = Date.now();
   const total = allNodes(pkg).length;
+  const layouts = new Map<SceneNode, Layout>();
+  const layoutOf = (node: SceneNode) => {
+    let layout = layouts.get(node);
+    if (!layout) layouts.set(node, (layout = deriveLayout(node)));
+    return layout;
+  };
+  // Give Figma's event loop a turn so the canvas, progress messages and
+  // cancellation stay responsive during large imports.
+  const breathe = async () => {
+    if (Date.now() - lastYield < 32) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lastYield = Date.now();
+  };
   try {
     let offset = 0;
     for (const screen of pkg.screens) {
@@ -377,6 +406,7 @@ export async function renderScene(
     screenId: string,
   ): Promise<NativeNode> {
     check();
+    await breathe();
     let native: NativeNode;
     if (source.kind === 'text') {
       const text = source.text!;
@@ -389,14 +419,21 @@ export async function renderScene(
       node.letterSpacing = { unit: 'PIXELS', value: text.letterSpacing };
       node.characters = text.characters;
       node.textDecoration = (text.textDecoration ?? 'none').toUpperCase() as TextDecoration;
+      if (text.textCase) node.textCase = text.textCase.toUpperCase() as TextCase;
+      const textEffects: Effect[] = (text.shadow ?? [])
+        .map((sh) => shadowEffect(sh, true))
+        .reverse();
+      if (source.style.blur) textEffects.push(blurEffect('LAYER_BLUR', source.style.blur));
+      if (textEffects.length) node.effects = textEffects;
       node.textAlignHorizontal = text.align.toUpperCase() as TextNode['textAlignHorizontal'];
-      node.fills = [paint(text.color)];
+      node.fills = source.style.gradients?.length ? gradientFills(source) : [paint(text.color)];
       const styleKey = JSON.stringify([
         node.fontName,
         text.fontSize,
         text.lineHeight,
         text.letterSpacing,
         text.textDecoration ?? 'none',
+        text.textCase ?? 'original',
       ]);
       if (options.foundations !== false) {
         let style = textStyles.get(styleKey);
@@ -408,6 +445,7 @@ export async function renderScene(
           style.lineHeight = node.lineHeight;
           style.letterSpacing = node.letterSpacing;
           style.textDecoration = node.textDecoration as TextDecoration;
+          style.textCase = node.textCase as TextCase;
           textStyles.set(styleKey, style);
           cleanup.push(style);
           stats.textStyles++;
@@ -420,6 +458,8 @@ export async function renderScene(
         node.setRangeFontName(run.start, run.end, fonts.resolutions.get(fontKey(request))!.font);
         if (run.fontSize !== undefined) node.setRangeFontSize(run.start, run.end, run.fontSize);
         if (run.color) node.setRangeFills(run.start, run.end, [paint(run.color)]);
+        if (run.textCase && run.textCase !== text.textCase)
+          node.setRangeTextCase(run.start, run.end, run.textCase.toUpperCase() as TextCase);
         if (run.textDecoration)
           node.setRangeTextDecoration(
             run.start,
@@ -442,10 +482,7 @@ export async function renderScene(
       stats.text++;
     } else if (source.kind === 'svg') {
       const asset = assets.get(source.assetId!)!;
-      const bytes = decodeBase64(asset.data);
-      const svg = decodeURIComponent(
-        Array.from(bytes, (b) => '%' + b.toString(16).padStart(2, '0')).join(''),
-      );
+      const svg = utf8Decode(decodeBase64(asset.data, api));
       if (
         /<(script|foreignObject)\b|\bon\w+\s*=|(?:href|src)\s*=\s*["']\s*(?:https?:|javascript:|\/\/)/i.test(
           svg,
@@ -460,7 +497,7 @@ export async function renderScene(
       const asset = assets.get(source.assetId!)!;
       let image = imageCache.get(asset.id);
       if (!image) {
-        image = api.createImage(decodeBase64(asset.data));
+        image = api.createImage(decodeBase64(asset.data, api));
         imageCache.set(asset.id, image);
       }
       const spec = source.image ?? {
@@ -528,6 +565,13 @@ export async function renderScene(
             ],
           },
         ];
+        if (source.style.gradients?.length) {
+          const overlay = api.createRectangle();
+          outer.appendChild(overlay);
+          overlay.name = 'Image / overlay';
+          overlay.resize(outer.width, outer.height);
+          overlay.fills = gradientFills(source);
+        }
         issues.push({
           code: 'IMAGE_CROP_CAPTURED',
           message:
@@ -539,8 +583,8 @@ export async function renderScene(
         const node = api.createRectangle();
         native = node;
         parent.appendChild(node);
-        node.fills = [imagePaint];
         node.resize(Math.max(0.01, source.bounds.width), Math.max(0.01, source.bounds.height));
+        node.fills = [imagePaint, ...gradientFills(source)];
       }
       stats.images++;
     } else {
@@ -550,7 +594,7 @@ export async function renderScene(
       node.fills = [];
       node.clipsContent = source.style.clipContent ?? false;
       node.resize(Math.max(0.01, source.bounds.width), Math.max(0.01, source.bounds.height));
-      const layout = deriveLayout(source);
+      const layout = layoutOf(source);
       if (layout.mode !== 'none') {
         node.layoutMode =
           layout.mode === 'grid'
@@ -587,8 +631,23 @@ export async function renderScene(
           node.counterAxisAlignItems =
             layout.align === 'center' ? 'CENTER' : layout.align === 'end' ? 'MAX' : 'MIN';
         }
+        const padding = [...layout.padding] as Layout['padding'];
+        const flow = source.children.filter((c) => c.position !== 'absolute');
+        const first = flow[0],
+          last = flow.at(-1);
+        if (first && last && layout.mode === 'vertical' && !layout.wrap) {
+          // Browser margins before/after the flow are measured, not snapped to a scale.
+          const edge = source.style.border;
+          const top = edge?.sides?.[0] ?? edge?.width ?? 0,
+            bottom = edge?.sides?.[2] ?? edge?.width ?? 0;
+          padding[0] = Math.max(0, first.bounds.y - source.bounds.y - top);
+          padding[2] = Math.max(
+            0,
+            source.bounds.y + source.bounds.height - last.bounds.y - last.bounds.height - bottom,
+          );
+        }
         const fields = ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const;
-        fields.forEach((field, i) => bindNumber(node, field, layout.padding[i]!));
+        fields.forEach((field, i) => bindNumber(node, field, padding[i]!));
         stats.autoLayout++;
       } else {
         stats.fixedFrames++;
@@ -600,7 +659,6 @@ export async function renderScene(
             nodeId: node.id,
           });
       }
-      const flowChildren = source.children.filter((c) => c.position !== 'absolute');
       const paintRanks = new Map<string, number>();
       let previous: SceneNode | undefined;
       for (const child of source.children) {
@@ -635,36 +693,32 @@ export async function renderScene(
       );
       if (painted.some((child, index) => child.id !== node.children[index]?.id))
         for (const child of painted) node.appendChild(child);
-      if (layout.mode !== 'none') {
-        const border = source.style.border?.width ?? 0;
-        // Browser margins before/after the flow are measured, not snapped to a scale.
-        const first = flowChildren[0],
-          last = flowChildren.at(-1);
-        if (first && last && layout.mode === 'vertical' && !layout.wrap) {
-          bindNumber(node, 'paddingTop', Math.max(0, first.bounds.y - source.bounds.y - border));
-          bindNumber(
-            node,
-            'paddingBottom',
-            Math.max(
-              0,
-              source.bounds.y + source.bounds.height - last.bounds.y - last.bounds.height - border,
-            ),
-          );
-        }
-        if (source.layout?.heightSizing === 'hug') node.layoutSizingVertical = 'HUG';
-      }
+      if (layout.mode !== 'none' && source.layout?.heightSizing === 'hug')
+        node.layoutSizingVertical = 'HUG';
     }
     native.name = source.name;
     if (source.layout?.minWidth !== undefined) native.minWidth = source.layout.minWidth || null;
     if (source.layout?.maxWidth !== undefined)
       native.maxWidth = Math.max(0.01, source.layout.maxWidth);
     native.opacity = source.style.opacity;
-    if ('fills' in native && source.kind === 'frame' && source.style.background)
-      native.fills = [paint(source.style.background)];
-    if ('strokes' in native && source.style.border && source.style.border.width > 0) {
-      native.strokes = [paint(source.style.border.color)];
-      native.strokeWeight = source.style.border.width;
+    if ('fills' in native && source.kind === 'frame') {
+      const fills: Paint[] = source.style.background ? [paint(source.style.background)] : [];
+      fills.push(...gradientFills(source));
+      if (fills.length) native.fills = fills;
+    }
+    const border = source.style.border;
+    if ('strokes' in native && border && (border.width > 0 || border.sides?.some((w) => w > 0))) {
+      native.strokes = [paint(border.color)];
       native.strokeAlign = 'INSIDE';
+      if (border.sides && 'strokeTopWeight' in native) {
+        native.strokeTopWeight = border.sides[0];
+        native.strokeRightWeight = border.sides[1];
+        native.strokeBottomWeight = border.sides[2];
+        native.strokeLeftWeight = border.sides[3];
+      } else native.strokeWeight = border.width;
+      const unit = Math.max(1, border.width || Math.max(...(border.sides ?? [1])));
+      if (border.dash)
+        native.dashPattern = border.dash === 'dashed' ? [unit * 3, unit * 3] : [unit, unit];
     }
     if ('topLeftRadius' in native && source.style.radius) {
       [
@@ -674,18 +728,17 @@ export async function renderScene(
         native.bottomLeftRadius,
       ] = source.style.radius;
     }
-    if ('effects' in native && source.style.shadow)
-      native.effects = source.style.shadow.map((sh) => ({
-        type: 'DROP_SHADOW',
-        color: sh.color,
-        offset: { x: sh.x, y: sh.y },
-        radius: sh.blur,
-        spread: sh.spread,
-        visible: true,
-        blendMode: 'NORMAL',
-      }));
+    if ('effects' in native && native.type !== 'TEXT') {
+      const effects: Effect[] = [...(source.style.shadow ?? [])]
+        .reverse()
+        .map((sh) => shadowEffect(sh));
+      if (source.style.blur) effects.push(blurEffect('LAYER_BLUR', source.style.blur));
+      if (source.style.backdropBlur)
+        effects.push(blurEffect('BACKGROUND_BLUR', source.style.backdropBlur));
+      if (effects.length) native.effects = effects;
+    }
     if (parentSource) {
-      const mode = deriveLayout(parentSource).mode;
+      const mode = layoutOf(parentSource).mode;
       if (mode === 'none' || source.position === 'absolute') {
         if (parent.layoutMode !== 'NONE') native.layoutPositioning = 'ABSOLUTE';
         native.x = source.bounds.x - parentSource.bounds.x;
@@ -701,9 +754,25 @@ export async function renderScene(
           native.layoutSizingHorizontal = 'FILL';
       }
     }
+    if (source.style.rotation && source.style.size && parentSource) {
+      // CSS rotates around the centre; Figma rotates around the top-left corner.
+      const { width, height } = source.style.size;
+      if (native.type === 'TEXT') native.textAutoResize = 'NONE';
+      native.resize(Math.max(0.01, width), Math.max(0.01, height));
+      const theta = (-source.style.rotation * Math.PI) / 180;
+      const cos = Math.cos(theta),
+        sin = Math.sin(theta);
+      const cx = source.bounds.x - parentSource.bounds.x + source.bounds.width / 2,
+        cy = source.bounds.y - parentSource.bounds.y + source.bounds.height / 2;
+      if (parent.layoutMode !== 'NONE') native.layoutPositioning = 'ABSOLUTE';
+      native.relativeTransform = [
+        [cos, sin, cx - (cos * width) / 2 - (sin * height) / 2],
+        [-sin, cos, cy + (sin * width) / 2 - (cos * height) / 2],
+      ];
+    }
     // Resizing and parent sizing setters can reset text resizing. Apply it last
     // so edited copy grows vertically instead of clipping at capture-time height.
-    if (native.type === 'TEXT') {
+    if (native.type === 'TEXT' && !source.style.rotation) {
       if (source.text?.maxLines) {
         native.textAutoResize = 'NONE';
         native.resize(Math.max(0.01, source.bounds.width), Math.max(0.01, source.bounds.height));

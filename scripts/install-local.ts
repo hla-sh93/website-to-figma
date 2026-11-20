@@ -35,9 +35,10 @@ if (verifyUrl && !fixture) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
     throw new Error('Verification requires a public HTTP(S) URL.');
 }
+const sourceDir = verifyUrl ? 'dist/diagnostic' : 'dist';
 const checks = [];
 for (const name of names) {
-  let bytes = await readFile(join('dist', name));
+  let bytes = await readFile(join(sourceDir, name));
   if (name === 'code.js') {
     const code = bytes.toString();
     if (!code.includes('__HLA_LOCAL_PAIRING_KEY__'))

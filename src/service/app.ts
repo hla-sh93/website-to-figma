@@ -184,7 +184,14 @@ export async function createLocalService(
       }
       if (!job.scene || job.state !== 'ready') throw new HttpError(409, 'Capture is not ready.');
       if (req.method === 'GET' && match[2] === 'scene') {
-        send(200, job.scene);
+        if (url.searchParams.get('screenshots') === '0') {
+          // The editor never uses screenshots; omit them to cut the payload.
+          const { screens, ...rest } = job.scene;
+          send(200, {
+            ...rest,
+            screens: screens.map(({ screenshot: _screenshot, ...screen }) => screen),
+          });
+        } else send(200, job.scene);
         return;
       }
       if (req.method === 'POST' && match[2] === 'compare') {

@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateScene, SCHEMA_VERSION } from '../src/core/scene.js';
+import {
+  MAX_DEPTH,
+  MAX_ENCODED_BYTES,
+  MAX_NODES,
+  validateScene,
+  SCHEMA_VERSION,
+} from '../src/core/scene.js';
 const fixture = (): any => ({
   version: 1,
   capture: {
@@ -168,7 +174,7 @@ test('rejects non-JSON values, cycles and excessive depth', () => {
   assert.throws(() => validateScene(s));
   delete s.extra;
   let n = s.screens[0].root;
-  for (let i = 0; i < 81; i++) {
+  for (let i = 0; i < MAX_DEPTH + 1; i++) {
     const c = { ...n, id: `n${i}`, children: [] };
     n.children = [c];
     n = c;
@@ -193,7 +199,7 @@ test('rejects asset mismatch, oversized counts and invalid issue scope', () => {
 test('enforces data and collection limits', () => {
   const cases = [
     (s: any) =>
-      (s.assets = Array.from({ length: 301 }, (_, i) => ({
+      (s.assets = Array.from({ length: 1501 }, (_, i) => ({
         id: String(i),
         kind: 'image',
         mimeType: 'image/png',
@@ -207,7 +213,7 @@ test('enforces data and collection limits', () => {
           id: 'a',
           kind: 'image',
           mimeType: 'image/png',
-          data: 'A'.repeat(32 * 1024 * 1024 + 4),
+          data: 'A'.repeat(MAX_ENCODED_BYTES + 4),
           width: 1,
           height: 1,
         },
@@ -215,7 +221,7 @@ test('enforces data and collection limits', () => {
     (s: any) =>
       (s.screens = Array.from({ length: 6 }, (_, i) => ({ ...s.screens[0], id: String(i) }))),
     (s: any) =>
-      (s.screens[0].root.children = Array.from({ length: 12000 }, (_, i) => ({
+      (s.screens[0].root.children = Array.from({ length: MAX_NODES }, (_, i) => ({
         ...s.screens[0].root,
         id: String(i),
         children: [],

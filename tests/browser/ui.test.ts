@@ -82,7 +82,9 @@ async function mount(
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.evaluate('globalThis.__name = value => value');
-  let ui = (await readFile('dist/ui.html', 'utf8'))
+  let ui = (
+    await readFile(options.verificationFixture ? 'dist/diagnostic/ui.html' : 'dist/ui.html', 'utf8')
+  )
     .replaceAll('__HLA_LOCAL_PAIRING_KEY__', app.pairingKey)
     .replaceAll('http://localhost:4017', app.url.replace('127.0.0.1', 'localhost'));
   if (options.verificationFixture)
@@ -102,6 +104,7 @@ async function mount(
     ({ ui, pairingKey, options }) => {
       document.body.style.margin = '0';
       (window as any).imports = [];
+      (window as any).preflights = [];
       (window as any).saved = [];
       const frame = document.createElement('iframe');
       frame.id = 'plugin';
@@ -128,6 +131,7 @@ async function mount(
             options.offline ? { type: 'CONNECTION_ERROR' } : { type: 'PAIR_SERVICE', pairingKey },
           );
         if (message.type === 'SAVE_PREFERENCES') (window as any).saved.push(message.preferences);
+        if (message.type === 'PREFLIGHT') (window as any).preflights.push(message);
         if (message.type === 'PREFLIGHT')
           setTimeout(
             () =>
@@ -238,6 +242,12 @@ test('simple opaque-frame UI pastes a URL and automatically imports selected siz
     assert.equal(imports.length, 1);
     assert.equal(imports[0].allowSubstitution, false);
     assert.equal(imports[0].scene.screens.length, 3);
+    // Font preparation sends only the font list, never the whole scene.
+    const preflights = await host.page.evaluate(() => (window as any).preflights);
+    assert.equal(preflights.length, 1);
+    assert.equal(preflights[0].scene, undefined);
+    assert.ok(Array.isArray(preflights[0].fonts));
+    assert.ok(imports[0].scene.screens.every((screen: object) => !('screenshot' in screen)));
     assert.deepEqual(host.errors, []);
     await mkdir('output/playwright', { recursive: true });
     await host.page.screenshot({ path: 'output/playwright/plugin-simple.png' });
