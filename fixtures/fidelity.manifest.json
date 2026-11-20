@@ -1,0 +1,9 @@
+{
+  "name": "Typography and crop fidelity cases",
+  "author": "Hla.Sh",
+  "file": "fidelity.html",
+  "provenance": "Original test page and inline SVG color bars authored for this project; no external resources or third-party brands.",
+  "viewports": [390],
+  "expectedFeatures": ["missing first CSS font with actual Arial fallback", "normal line height", "underline and strikethrough", "range letter spacing", "font variation request", "cover and contain", "object-position calc", "padding and border content box", "none, scale-down and fill"],
+  "verification": "30 sampled source pixels; native image and typography rerun pending connector quota."
+}

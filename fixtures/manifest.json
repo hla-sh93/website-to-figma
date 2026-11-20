@@ -1,0 +1,9 @@
+{
+  "name": "Forma owned reference",
+  "author": "Hla.Sh",
+  "file": "reference.html",
+  "provenance": "Original fictional landing page authored for this project. Inline artwork and copy are owned fixture content; no third-party resources, scripts, or brands.",
+  "viewports": [390, 768, 1440],
+  "expectedFeatures": ["Arial system font", "semantic header hero buttons cards pricing footer", "three repeated cards", "flex and grid", "inline SVG", "base64 image data URI", "700px mobile breakpoint", "desktop navigation hidden on mobile", "mobile menu hidden on desktop", "Arabic RTL", "mixed inline bold text", "named data-figma-id attributes"],
+  "benchmark": "No human cleanup benchmark yet."
+}

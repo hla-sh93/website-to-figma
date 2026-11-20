@@ -1,0 +1,26 @@
+{
+  "author": "Hla.Sh",
+  "date": "2026-11-16",
+  "version": "0.3.0-alpha.5-debug",
+  "status": "development-in-progress",
+  "localValidation": {
+    "command": "npm run check",
+    "format": "passed",
+    "types": "passed",
+    "build": "passed",
+    "unitAndApi": { "passed": 60, "failed": 0, "skipped": 0 },
+    "chromium": { "passed": 37, "failed": 0, "skipped": 0 },
+    "knownDependencyAdvisories": 0
+  },
+  "publicCaptureRun": "output/review-public-sites/2026-11-16T05-56-32-431Z-2e196d9b/report.json",
+  "nativeValidation": {
+    "status": "awaiting-editable-file",
+    "observed": "Ask to edit",
+    "fileUrl": "https://www.figma.com/design/qTgTA125JqaCSg4Yo6xxdJ",
+    "newNativeImportTested": false,
+    "visualAcceptance": "not-passed"
+  },
+  "deployment": { "mode": "normal", "verificationMode": false, "pairing": "ready", "genericBundleContainsCredential": false },
+  "review": "tasks/full-review.md",
+  "plan": "tasks/product-quality-plan.md"
+}

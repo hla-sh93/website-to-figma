@@ -1,0 +1,296 @@
+{
+  "date": "2026-10-29",
+  "author": "Hla.Sh",
+  "fileUrl": "https://www.figma.com/design/qTgTA125JqaCSg4Yo6xxdJ",
+  "result": {
+    "containerId": "14:62",
+    "screenIds": [
+      "14:63"
+    ],
+    "createdNodeIds": [
+      "14:62",
+      "14:63",
+      "14:66",
+      "14:71",
+      "14:73",
+      "14:76",
+      "14:81",
+      "14:118",
+      "I14:118;14:112",
+      "I14:118;14:113",
+      "I14:118;14:114",
+      "I14:118;14:115",
+      "I14:118;14:116",
+      "14:124",
+      "I14:124;14:112",
+      "I14:124;14:113",
+      "I14:124;14:114",
+      "I14:124;14:115",
+      "I14:124;14:116",
+      "14:130",
+      "I14:130;14:112",
+      "I14:130;14:113",
+      "I14:130;14:114",
+      "I14:130;14:115",
+      "I14:130;14:116",
+      "14:110",
+      "14:117",
+      "14:112",
+      "14:113",
+      "14:114",
+      "14:115",
+      "14:116"
+    ],
+    "mapping": {
+      "viewport-1440:root/0/0": "14:73",
+      "viewport-1440:root/0/1": "14:76",
+      "viewport-1440:root/0": "14:71",
+      "viewport-1440:root/1/0/0": "I14:118;14:112",
+      "viewport-1440:root/1/0/1": "I14:118;14:114",
+      "viewport-1440:root/1/0/2": "I14:118;14:116",
+      "viewport-1440:root/1/0": "14:118",
+      "viewport-1440:root/1/1/0": "I14:124;14:112",
+      "viewport-1440:root/1/1/1": "I14:124;14:114",
+      "viewport-1440:root/1/1/2": "I14:124;14:116",
+      "viewport-1440:root/1/1": "14:124",
+      "viewport-1440:root/1/2/0": "I14:130;14:112",
+      "viewport-1440:root/1/2/1": "I14:130;14:114",
+      "viewport-1440:root/1/2/2": "I14:130;14:116",
+      "viewport-1440:root/1/2": "14:130",
+      "viewport-1440:root/1": "14:81",
+      "viewport-1440:root": "14:66",
+      "viewport-1440:capture-root": "14:63"
+    },
+    "issues": [
+      {
+        "code": "FONT_SUBSTITUTED",
+        "message": "Arial 700 normal → Inter Bold. Text wrapping may differ."
+      },
+      {
+        "code": "FONT_SUBSTITUTED",
+        "message": "Arial 400 normal → Inter Regular. Text wrapping may differ."
+      }
+    ],
+    "stats": {
+      "text": 11,
+      "images": 0,
+      "vectors": 0,
+      "autoLayout": 7,
+      "fixedFrames": 0,
+      "variables": 17,
+      "textStyles": 5,
+      "components": 1,
+      "instances": 3
+    }
+  },
+  "checks": {
+    "gridPlacement": true,
+    "resizeWorks": true,
+    "contentGrowth": true,
+    "bindingWorks": true
+  },
+  "growthDiagnostic": {
+    "before": 244.59375,
+    "after": 559.59375,
+    "instanceSizing": "HUG",
+    "masterSizing": "HUG",
+    "texts": [
+      {
+        "name": "number",
+        "width": 73,
+        "height": 20,
+        "resizing": "WIDTH_AND_HEIGHT",
+        "sizing": "HUG"
+      },
+      {
+        "name": "h3",
+        "width": 242,
+        "height": 344,
+        "resizing": "HEIGHT",
+        "sizing": "FILL"
+      },
+      {
+        "name": "p",
+        "width": 242,
+        "height": 68,
+        "resizing": "HEIGHT",
+        "sizing": "FILL"
+      }
+    ]
+  },
+  "geometry": [
+    {
+      "sourceId": "capture-root",
+      "bounds": {
+        "x": 130,
+        "y": 774.75,
+        "width": 1180,
+        "height": 510.1875
+      }
+    },
+    {
+      "sourceId": "root",
+      "bounds": {
+        "x": 130,
+        "y": 774.75,
+        "width": 1180,
+        "height": 510.1875
+      }
+    },
+    {
+      "sourceId": "root/0",
+      "bounds": {
+        "x": 158,
+        "y": 834.75,
+        "width": 600,
+        "height": 133.59375
+      }
+    },
+    {
+      "sourceId": "root/0/0",
+      "bounds": {
+        "x": 158,
+        "y": 841.75,
+        "width": 247,
+        "height": 20
+      },
+      "text": "LESS NOISE. MORE POSSIBILITY."
+    },
+    {
+      "sourceId": "root/0/1",
+      "bounds": {
+        "x": 158,
+        "y": 881.34375,
+        "width": 600,
+        "height": 87
+      },
+      "text": "A little structure.\nA lot of breathing room."
+    },
+    {
+      "sourceId": "root/1",
+      "bounds": {
+        "x": 158,
+        "y": 998.34375,
+        "width": 1124,
+        "height": 221.59375
+      }
+    },
+    {
+      "sourceId": "root/1/0",
+      "bounds": {
+        "x": 158,
+        "y": 998.34375,
+        "width": 360,
+        "height": 221.59375
+      }
+    },
+    {
+      "sourceId": "root/1/0/0",
+      "bounds": {
+        "x": 187,
+        "y": 1034.34375,
+        "width": 73,
+        "height": 20
+      },
+      "text": "01 / PLAN"
+    },
+    {
+      "sourceId": "root/1/0/1",
+      "bounds": {
+        "x": 187,
+        "y": 1080.9375,
+        "width": 302,
+        "height": 29
+      },
+      "text": "See the whole picture."
+    },
+    {
+      "sourceId": "root/1/0/2",
+      "bounds": {
+        "x": 187,
+        "y": 1131.9375,
+        "width": 302,
+        "height": 45
+      },
+      "text": "Turn scattered thoughts into a shared plan, with a clear next step for everyone."
+    },
+    {
+      "sourceId": "root/1/1",
+      "bounds": {
+        "x": 540,
+        "y": 998.34375,
+        "width": 360,
+        "height": 221.59375
+      }
+    },
+    {
+      "sourceId": "root/1/1/0",
+      "bounds": {
+        "x": 569,
+        "y": 1034.34375,
+        "width": 108,
+        "height": 20
+      },
+      "text": "02 / CONNECT"
+    },
+    {
+      "sourceId": "root/1/1/1",
+      "bounds": {
+        "x": 569,
+        "y": 1080.9375,
+        "width": 302,
+        "height": 29
+      },
+      "text": "Stay in good company."
+    },
+    {
+      "sourceId": "root/1/1/2",
+      "bounds": {
+        "x": 569,
+        "y": 1131.9375,
+        "width": 302,
+        "height": 45
+      },
+      "text": "Keep conversations close to the work. Every detail has a place, and every voice belongs."
+    },
+    {
+      "sourceId": "root/1/2",
+      "bounds": {
+        "x": 922,
+        "y": 998.34375,
+        "width": 360,
+        "height": 221.59375
+      }
+    },
+    {
+      "sourceId": "root/1/2/0",
+      "bounds": {
+        "x": 951,
+        "y": 1034.34375,
+        "width": 80,
+        "height": 20
+      },
+      "text": "03 / GROW"
+    },
+    {
+      "sourceId": "root/1/2/1",
+      "bounds": {
+        "x": 951,
+        "y": 1080.9375,
+        "width": 302,
+        "height": 29
+      },
+      "text": "Move at your rhythm."
+    },
+    {
+      "sourceId": "root/1/2/2",
+      "bounds": {
+        "x": 951,
+        "y": 1131.9375,
+        "width": 302,
+        "height": 45
+      },
+      "text": "Build small habits that lead to big progress. Find a flow that feels like your own."
+    }
+  ]
+}
