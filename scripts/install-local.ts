@@ -39,15 +39,18 @@ const sourceDir = verifyUrl ? 'dist/diagnostic' : 'dist';
 const checks = [];
 for (const name of names) {
   let bytes = await readFile(join(sourceDir, name));
-  if (name === 'code.js') {
+  // Both halves carry the private channel key: code.js (main) and ui.html (iframe).
+  if (name === 'code.js' || name === 'ui.html') {
     const code = bytes.toString();
     if (!code.includes('__HLA_LOCAL_PAIRING_KEY__'))
-      throw new Error('Pairing placeholder missing; rebuild first.');
+      throw new Error(`Pairing placeholder missing in ${name}; rebuild first.`);
     bytes = Buffer.from(
       code
         .replaceAll('__HLA_LOCAL_PAIRING_KEY__', key)
         .replaceAll('__HLA_VERIFICATION_URL__', encodeURIComponent(verifyUrl)),
     );
+    if (bytes.toString().includes('__HLA_LOCAL_PAIRING_KEY__'))
+      throw new Error(`Pairing placeholder left in ${name}.`);
   }
   await writeFile(join(target, name), bytes);
   const deployed = await readFile(join(target, name));
