@@ -31,6 +31,8 @@ export type RenderOptions = {
   foundations?: boolean;
   components?: boolean;
   metadata?: boolean;
+  /** Wrap the imported screens in a section (default) instead of a plain frame. */
+  section?: boolean;
   /** Set when the caller already ran validateScene on this exact object. */
   validated?: boolean;
   isCancelled?: () => boolean;
@@ -102,9 +104,9 @@ export function deriveLayout(node: SceneNode): Layout {
     padding: [...(node.layout?.padding ?? [0, 0, 0, 0])] as Layout['padding'],
   };
   const children = node.children.filter((n) => n.position !== 'absolute');
-  const paintedFlow = [...children].sort((a, b) => paintRank(a) - paintRank(b));
-  if (children.some((child, index) => child.id !== paintedFlow[index]?.id))
-    return { ...layout, mode: 'none' };
+  // Auto layout paints in flow order. A different stacking order only matters
+  // where flow items overlap (a sticky header over separate content does not).
+  if (paintConflict(children)) return { ...layout, mode: 'none' };
   if (layout.mode === 'vertical' && !layout.wrap) {
     const start = node.bounds.x + layout.padding[3],
       end = node.bounds.x + node.bounds.width - layout.padding[1];
@@ -135,6 +137,24 @@ export function deriveLayout(node: SceneNode): Layout {
     max = Math.max(...gaps);
   if (max - min <= 1) layout.gap = Math.max(0, gaps.reduce((a, b) => a + b, 0) / gaps.length);
   return layout;
+}
+const overlaps = (a: SceneNode, b: SceneNode) =>
+  a.bounds.x < b.bounds.x + b.bounds.width - 0.5 &&
+  b.bounds.x < a.bounds.x + a.bounds.width - 0.5 &&
+  a.bounds.y < b.bounds.y + b.bounds.height - 0.5 &&
+  b.bounds.y < a.bounds.y + a.bounds.height - 0.5;
+function paintConflict(flow: SceneNode[]): boolean {
+  for (let i = 0; i < flow.length; i++)
+    for (let j = i + 1; j < flow.length; j++)
+      if (paintRank(flow[i]!) > paintRank(flow[j]!) && overlaps(flow[i]!, flow[j]!)) return true;
+  return false;
+}
+function isSingleLine(source: SceneNode): boolean {
+  return (
+    !!source.text &&
+    !source.text.characters.includes('\n') &&
+    source.bounds.height < source.text.lineHeight * 1.6
+  );
 }
 export function paintRank(node: SceneNode): number {
   if (node.source.tag === '#background') return -Infinity;
@@ -320,6 +340,51 @@ export async function renderScene(
     }
     node.setBoundVariable(field, variable);
   };
+  // Auto flow fills each row from the left. A short last row in a right-to-left
+  // grid starts at the right edge, so measured cells are placed explicitly.
+  const placeGridCells = (node: FrameNode, source: SceneNode, screenId: string) => {
+    const items = source.children.filter(
+      (c) => c.position !== 'absolute' && c.source.tag !== '#background',
+    );
+    const columns = node.gridColumnCount;
+    const xs = [...new Set(items.map((c) => Math.round(c.bounds.x)))].sort((a, b) => a - b);
+    const rows: number[] = [];
+    for (const y of items.map((c) => c.bounds.y).sort((a, b) => a - b))
+      if (!rows.length || y - rows.at(-1)! > 2) rows.push(y);
+    if (xs.length !== columns) return;
+    const cells = items.map((c) => ({
+      node: node.children.find((n) => n.id === mapping[`${screenId}:${c.id}`]),
+      row: rows.findIndex((y) => Math.abs(c.bounds.y - y) <= 2),
+      column: xs.indexOf(Math.round(c.bounds.x)),
+    }));
+    if (cells.some((cell) => !cell.node || cell.row < 0 || cell.column < 0)) return;
+    if (
+      cells.every((cell, i) => cell.row === Math.floor(i / columns) && cell.column === i % columns)
+    )
+      return;
+    if (new Set(cells.map((cell) => `${cell.row}:${cell.column}`)).size !== cells.length) return;
+    const rowCount = node.gridRowCount;
+    node.gridRowCount = Math.max(rowCount, rows.length);
+    node.gridItemsPositioning = 'MANUAL';
+    try {
+      // Move the furthest cells first so no target is still held by an unmoved item.
+      for (const cell of [...cells].sort(
+        (a, b) => b.row * columns + b.column - (a.row * columns + a.column),
+      ))
+        (cell.node as FrameNode).setGridChildPosition(cell.row, cell.column);
+    } catch {
+      node.gridItemsPositioning = 'ROW_AUTO_FLOW';
+      node.gridRowCount = rowCount;
+      issues.push({
+        code: 'GRID_ORDER',
+        message:
+          'Grid cells keep automatic order; the measured cell positions could not be placed.',
+        sourceId: source.id,
+        nodeId: node.id,
+      });
+    }
+  };
+  const huggers = new Set<string>();
   let done = 0,
     lastYield = Date.now();
   const total = allNodes(pkg).length;
@@ -363,15 +428,50 @@ export async function renderScene(
     }
     staging.name = `${prefix} / Editable layers`;
     check();
+    // A section keeps each screen a top-level frame: exportable, prototypable and
+    // usable as a starting point for the web design, with the import labelled once.
+    let container: FrameNode | SectionNode = staging;
+    if (options.section !== false && typeof api.createSection === 'function') {
+      const section = api.createSection();
+      cleanup.push(section);
+      section.name = `${pkg.capture.title || captureHost(pkg.capture.url)} · ${captureHost(pkg.capture.url)}`;
+      section.x = staging.x;
+      section.y = staging.y;
+      const margin = 80;
+      for (const child of [...staging.children]) {
+        const x = child.x,
+          y = child.y;
+        section.appendChild(child);
+        child.x = x + margin;
+        child.y = y + margin;
+      }
+      section.resizeWithoutConstraints(staging.width + margin * 2, staging.height + margin * 2);
+      if (options.metadata !== false)
+        section.setPluginData(
+          'website-import',
+          JSON.stringify({ captureId: pkg.capture.id, url: pkg.capture.url }),
+        );
+      staging.remove();
+      container = section;
+    }
     const createdNodeIds: string[] = [];
     const collect = (n: BaseNode) => {
       createdNodeIds.push(n.id);
       if ('children' in n) (n as ChildrenMixin).children.forEach(collect);
     };
-    collect(staging);
-    api.currentPage.selection = screens.map((id) => staging.children.find((n) => n.id === id)!);
-    api.viewport.scrollAndZoomIntoView([staging]);
-    return { containerId: staging.id, screenIds: screens, createdNodeIds, mapping, issues, stats };
+    collect(container);
+    api.currentPage.selection = screens.map(
+      (id) => (container.children as readonly BaseNode[]).find((n) => n.id === id) as FrameNode,
+    );
+    api.viewport.scrollAndZoomIntoView([container]);
+    return {
+      containerId: container.id,
+      screenIds: screens,
+      createdNodeIds,
+      mapping,
+      issues,
+      stats,
+    };
   } catch (error) {
     for (const resource of cleanup.reverse())
       try {
@@ -660,6 +760,7 @@ export async function renderScene(
           });
       }
       const paintRanks = new Map<string, number>();
+      const builtChildren = new Map<string, Awaited<ReturnType<typeof buildNative>>>();
       let previous: SceneNode | undefined;
       for (const child of source.children) {
         if (
@@ -685,16 +786,52 @@ export async function renderScene(
           }
         }
         const built = await buildNative(child, node, source, screenId);
+        builtChildren.set(child.id, built);
         paintRanks.set(built.id, paintRank(child));
         if (child.position !== 'absolute') previous = child;
       }
       const painted = [...node.children].sort(
         (a, b) => (paintRanks.get(a.id) ?? 0) - (paintRanks.get(b.id) ?? 0),
       );
-      if (painted.some((child, index) => child.id !== node.children[index]?.id))
+      // Re-stack only when it keeps the flow order; auto layout positions follow child order.
+      const flowIds = new Set(
+        source.children
+          .filter((c) => c.position !== 'absolute')
+          .map((c) => builtChildren.get(c.id)?.id),
+      );
+      const flowOrder = (list: readonly BaseNode[]) =>
+        list
+          .filter((n) => flowIds.has(n.id))
+          .map((n) => n.id)
+          .join();
+      const keepsFlow = layout.mode === 'none' || flowOrder(painted) === flowOrder(node.children);
+      if (keepsFlow && painted.some((child, index) => child.id !== node.children[index]?.id))
         for (const child of painted) node.appendChild(child);
+      if (layout.mode === 'grid') placeGridCells(node, source, screenId);
       if (layout.mode !== 'none' && source.layout?.heightSizing === 'hug')
         node.layoutSizingVertical = 'HUG';
+      // Buttons, links and chips around one line of copy hug it, as a designer
+      // would build them; the label then never wraps when Figma glyphs are wider.
+      const flowChildren = source.children.filter((c) => c.position !== 'absolute');
+      const only = flowChildren.length === 1 ? flowChildren[0]! : undefined;
+      const onlyNative = only ? builtChildren.get(only.id) : undefined;
+      if (
+        only &&
+        onlyNative &&
+        (layout.mode === 'vertical' || layout.mode === 'horizontal') &&
+        (huggers.has(only.id) || (onlyNative.type === 'TEXT' && isSingleLine(only)))
+      ) {
+        const edge = source.style.border;
+        const sides = edge?.sides ?? [0, edge?.width ?? 0, 0, edge?.width ?? 0];
+        const content =
+          source.bounds.width - layout.padding[1] - layout.padding[3] - sides[1]! - sides[3]!;
+        if (Math.abs(content - only.bounds.width) <= 2) {
+          onlyNative.layoutSizingHorizontal = 'HUG';
+          if (onlyNative.type === 'TEXT') onlyNative.textAutoResize = 'WIDTH_AND_HEIGHT';
+          node.layoutSizingHorizontal = 'HUG';
+          huggers.add(source.id);
+        }
+      }
     }
     native.name = source.name;
     if (source.layout?.minWidth !== undefined) native.minWidth = source.layout.minWidth || null;
@@ -750,7 +887,10 @@ export async function renderScene(
       } else {
         const padding = parentSource.layout?.padding ?? [0, 0, 0, 0];
         const inner = parentSource.bounds.width - padding[1] - padding[3];
-        if (Math.abs(source.bounds.width - inner) <= 3 || source.layout?.widthSizing === 'fill')
+        if (
+          !huggers.has(source.id) &&
+          (Math.abs(source.bounds.width - inner) <= 3 || source.layout?.widthSizing === 'fill')
+        )
           native.layoutSizingHorizontal = 'FILL';
       }
     }
@@ -778,8 +918,29 @@ export async function renderScene(
         native.resize(Math.max(0.01, source.bounds.width), Math.max(0.01, source.bounds.height));
         native.textTruncation = 'ENDING';
         native.maxLines = source.text.maxLines;
-      } else
-        native.textAutoResize = source.text?.sizing === 'inline' ? 'WIDTH_AND_HEIGHT' : 'HEIGHT';
+      } else {
+        // One measured line must stay one line: Figma's glyph metrics can be a
+        // little wider than the browser's, which would wrap a fixed-width label.
+        const singleLine = isSingleLine(source) && native.layoutSizingHorizontal !== 'FILL';
+        const before = native.width;
+        native.textAutoResize =
+          source.text?.sizing === 'inline' || singleLine ? 'WIDTH_AND_HEIGHT' : 'HEIGHT';
+        const positioned =
+          parent.type !== 'FRAME' ||
+          parent.layoutMode === 'NONE' ||
+          native.layoutPositioning === 'ABSOLUTE';
+        if (singleLine && positioned && native.width !== before) {
+          // Keep the edge the browser aligned the line to.
+          const align =
+            source.text!.align === 'justify'
+              ? source.text!.direction === 'rtl'
+                ? 'right'
+                : 'left'
+              : source.text!.align;
+          if (align === 'right') native.x += before - native.width;
+          else if (align === 'center') native.x += (before - native.width) / 2;
+        }
+      }
     }
     if (options.metadata !== false)
       native.setPluginData(

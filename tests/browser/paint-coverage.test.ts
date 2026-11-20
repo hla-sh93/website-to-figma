@@ -48,6 +48,8 @@ body{margin:0;font:16px Arial}
 <p id="upper">Read more</p>
 <p id="shadowed">Shadow</p>
 <p id="gradient-text">Gradient</p>
+<p id="icon-line"><a href="#"><i id="fa" style="font-family:'Font Awesome 6 Brands'"></i></a></p>
+<style>#fa::before{content:"${String.fromCharCode(0xf232)}"}</style>
 <img id="photo" width="64" height="32" src="data:image/jpeg;base64,${jpeg.toString('base64')}">
 <div id="deep">${'<div>'.repeat(115)}Deep text${'</div>'.repeat(115)}</div>
 </body></html>`;
@@ -141,6 +143,16 @@ test('JPEG photos keep their original bytes instead of being re-encoded', () => 
 
 test('content beyond the depth budget becomes an image instead of failing the capture', () => {
   assert.ok(scene.issues.some((i) => i.code === 'raster-fallback'));
-  const raster = nodes.find((n) => n.kind === 'image' && n.name.startsWith('Image / div'));
+  const raster = nodes.find((n) => n.kind === 'image' && n.source.tag === 'div');
   assert.ok(raster?.assetId, 'raster image asset');
+});
+
+test('icon-font glyphs become sharp icon images instead of text in a missing font', () => {
+  const icon = byKey('fa');
+  assert.equal(icon.kind, 'image');
+  assert.equal(icon.name, 'Icon');
+  const asset = scene.assets.find((a) => a.id === icon.assetId)!;
+  assert.equal(asset.mimeType, 'image/png');
+  assert.ok(asset.width >= icon.bounds.width * 3);
+  assert.ok(nodes.every((n) => !/Font Awesome/.test(n.text?.fontFamily ?? '')));
 });

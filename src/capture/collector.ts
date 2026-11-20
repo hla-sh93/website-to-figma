@@ -376,6 +376,41 @@ export function collect(selector: string | undefined): {
     if (!parts || parts.join(' ').length !== value.trim().length) return null;
     return parts.map((part) => part.slice(1, -1).replace(/\\(.)/g, '$1')).join('');
   };
+  // Icon fonts are not installed in Figma; their glyphs are drawn to a sharp image instead.
+  const ICON_FONT =
+    /awesome|material (?:icons|symbols)|icomoon|ionicons|bootstrap-icons|remixicon|glyphicons|dashicons|feather|fontello|themify|simple-line-icons|boxicons|phosphor|tabler|icofont|flaticon|lineicons|unicons/i;
+  const PRIVATE_USE = /^[\uE000-\uF8FF\s]+$/;
+  const iconGlyph = (el: Element, c: CSSStyleDeclaration, r: DOMRect): string | null => {
+    if (el.children.length || r.width > 128 || r.height > 128) return null;
+    const parts: { text: string; style: CSSStyleDeclaration }[] = [];
+    for (const which of ['::before', '::after'] as const) {
+      const ps = getComputedStyle(el, which);
+      const value = contentString(ps.content);
+      if (value) parts.push({ text: value, style: ps });
+    }
+    const own = (el.textContent ?? '').trim();
+    if (own) parts.push({ text: own, style: c });
+    if (
+      !parts.length ||
+      !parts.every((p) => ICON_FONT.test(p.style.fontFamily) || PRIVATE_USE.test(p.text))
+    )
+      return null;
+    const scale = 4;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(r.width * scale));
+    canvas.height = Math.max(1, Math.round(r.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    for (const p of parts) {
+      const s = p.style;
+      context.font = `${s.fontStyle} ${s.fontWeight} ${px(s.fontSize) * scale}px ${s.fontFamily}`;
+      context.fillStyle = s.color;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(p.text, canvas.width / 2, canvas.height / 2);
+    }
+    return canvas.toDataURL('image/png');
+  };
   const cssPath = (el: Element): string => {
     const parts: string[] = [];
     for (let current: Element | null = el; current; current = current.parentElement) {
@@ -794,7 +829,11 @@ export function collect(selector: string | undefined): {
         .replace(/\s+/g, ' ')
         .slice(0, 100),
       kind: 'frame',
-      source: { tag: el.tagName.toLowerCase(), key },
+      source: {
+        tag: el.tagName.toLowerCase(),
+        key,
+        ...(el.getAttribute('role') ? { role: el.getAttribute('role')!.split(' ')[0]! } : {}),
+      },
       bounds: { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height },
       style: {
         ...box.style,
@@ -870,6 +909,22 @@ export function collect(selector: string | undefined): {
     }
     if (['CANVAS', 'IFRAME'].includes(el.tagName))
       issue(id, 'unsupported-media', 'Dynamic media is present only in the source screenshot.');
+    const glyph = iconGlyph(el, c, r);
+    if (glyph) {
+      n.kind = 'image';
+      n.name = 'Icon';
+      n.children = [];
+      sources.push({
+        nodeId: id,
+        kind: 'image',
+        url: glyph,
+        width: Math.round(r.width * 4),
+        height: Math.round(r.height * 4),
+      });
+      n.image = { fit: 'fill', position: [0.5, 0.5] };
+      flattened.add(id);
+      return n;
+    }
     if (el instanceof HTMLImageElement) {
       n.kind = 'image';
       sources.push({
@@ -1365,6 +1420,9 @@ export function collect(selector: string | undefined): {
         /\[|subgrid|masonry/.test(c.gridTemplateColumns) ||
         [...el.children].some((child) => {
           const style = getComputedStyle(child);
+          // Empty or hidden items (sentinels, spacers) are not imported and cannot move others.
+          const box = child.getBoundingClientRect();
+          if (hidden(child, style) || !box.width || !box.height) return false;
           return [
             style.gridColumnStart,
             style.gridColumnEnd,
@@ -1392,6 +1450,28 @@ export function collect(selector: string | undefined): {
       );
     if (pseudoNodes.before.length || pseudoNodes.after.length)
       n.children = [...pseudoNodes.before, ...n.children, ...pseudoNodes.after];
+    // Right-to-left rows and grids flow from the right edge. Figma auto layout always
+    // flows left to right, so in-flow children are stored in visual order instead.
+    if (c.direction === 'rtl' && (n.layout.mode === 'horizontal' || n.layout.mode === 'grid')) {
+      const inFlow = (child: SceneNode) =>
+        child.position !== 'absolute' && child.source.tag !== '#background';
+      const visual = n.children
+        .filter(inFlow)
+        .sort((a, b) =>
+          n.layout!.mode === 'grid' || n.layout!.wrap
+            ? Math.round(a.bounds.y) - Math.round(b.bounds.y) || a.bounds.x - b.bounds.x
+            : a.bounds.x - b.bounds.x,
+        );
+      let next = 0;
+      n.children = n.children.map((child) => (inFlow(child) ? visual[next++]! : child));
+      if (n.layout.mode === 'horizontal')
+        n.layout.justify =
+          n.layout.justify === 'start'
+            ? 'end'
+            : n.layout.justify === 'end'
+              ? 'start'
+              : n.layout.justify;
+    }
     if (backgroundUrl) {
       const inset =
         c.backgroundOrigin === 'border-box'

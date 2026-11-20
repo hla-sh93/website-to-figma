@@ -135,9 +135,16 @@ export async function createComponents(
         widthMode = old.layoutSizingHorizontal,
         heightMode = old.layoutSizingVertical,
         position = old.layoutPositioning;
+      const manualCell =
+        parent.type === 'FRAME' &&
+        parent.layoutMode === 'GRID' &&
+        parent.gridItemsPositioning === 'MANUAL'
+          ? [old.gridRowAnchorIndex, old.gridColumnAnchorIndex]
+          : undefined;
       parent.insertChild(index, instance);
       instance.layoutPositioning = position;
-      if (parent.type === 'FRAME' && parent.layoutMode === 'GRID') {
+      // A manual cell is still held by the original; the instance takes it after removal below.
+      if (!manualCell && parent.type === 'FRAME' && parent.layoutMode === 'GRID') {
         parent.gridItemsPositioning = 'ROW_AUTO_FLOW';
         grids.add(parent);
       }
@@ -162,6 +169,7 @@ export async function createComponents(
         }
       }
       old.remove();
+      if (manualCell) instance.setGridChildPosition(manualCell[0]!, manualCell[1]!);
     }
     for (const grid of grids)
       grid.gridRowCount = Math.max(

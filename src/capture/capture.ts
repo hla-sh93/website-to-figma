@@ -13,6 +13,7 @@ import { assertPublicUrl } from '../service/network-policy.js';
 import { startEgressProxy } from '../service/egress-proxy.js';
 import sharp from 'sharp';
 import { collect } from './collector.js';
+import { nameLayers } from '../core/naming.js';
 import { inspectFonts } from './fonts.js';
 import { captureGate, freezePage, pageFingerprint } from './page-state.js';
 import { normalizeImage, MAX_ASSET_BYTES } from './images.js';
@@ -592,6 +593,7 @@ async function capture(
             },
             children: [content],
           };
+          nameLayers(root);
           const screenshot = await page.screenshot({
             clip,
             fullPage: true,

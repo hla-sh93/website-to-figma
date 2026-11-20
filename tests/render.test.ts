@@ -288,3 +288,155 @@ test('cancellation removes every layer, style and variable the import created', 
   assert.ok(figma.variables.every((v) => v.removed));
   assert.ok(figma.styles.every((s) => s.removed));
 });
+
+test('screens become top-level frames inside one labelled section', async () => {
+  const { page, result, all } = await render(
+    scene([node('one', { style: { opacity: 1, background: red } })]),
+  );
+  const section = all.find((n) => n.id === result.containerId)!;
+  assert.equal(section.type, 'SECTION');
+  assert.equal(section.parent, page);
+  assert.equal(section.name, 'Example · example.test');
+  assert.ok(
+    result.screenIds.every((id) => section.children.some((c: { id: string }) => c.id === id)),
+  );
+  assert.ok(
+    all.every((n) => n.type !== 'FRAME' || !n.name.endsWith('/ Editable layers') || n.removed),
+  );
+});
+
+test('a short last row of a right-to-left grid keeps its measured cells', async () => {
+  const cell = (id: string, x: number, y: number) =>
+    node(id, { position: 'flow', bounds: { x, y, width: 100, height: 100 } });
+  const { byId } = await render(
+    scene([
+      node('grid', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 320, height: 210 },
+        layout: {
+          mode: 'grid',
+          gap: 10,
+          rowGap: 10,
+          padding: [0, 0, 0, 0],
+          align: 'start',
+          justify: 'start',
+          wrap: false,
+          widthSizing: 'fixed',
+          heightSizing: 'hug',
+          columns: 3,
+        },
+        // Visual order after the collector's RTL reordering: row by row, left to right.
+        children: [
+          cell('a', 0, 0),
+          cell('b', 110, 0),
+          cell('c', 220, 0),
+          cell('d', 110, 110),
+          cell('e', 220, 110),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('grid').gridItemsPositioning, 'MANUAL');
+  assert.deepEqual(
+    ['d', 'e'].map((id) => [byId(id).gridRowAnchorIndex, byId(id).gridColumnAnchorIndex]),
+    [
+      [1, 1],
+      [1, 2],
+    ],
+  );
+});
+
+test('single measured lines cannot wrap when Figma glyphs are wider', async () => {
+  const { byId } = await render(
+    scene([
+      node('nav', {
+        kind: 'text',
+        bounds: { x: 0, y: 0, width: 60, height: 20 },
+        text: text('الرئيسية', { direction: 'rtl', align: 'right' }),
+      }),
+      node('copy', {
+        kind: 'text',
+        bounds: { x: 0, y: 40, width: 200, height: 60 },
+        text: text('A paragraph that the browser wrapped over three lines.'),
+      }),
+    ]),
+  );
+  assert.equal(byId('nav').textAutoResize, 'WIDTH_AND_HEIGHT');
+  assert.equal(byId('copy').textAutoResize, 'HEIGHT');
+});
+
+test('a chip around one line of copy hugs its label instead of filling', async () => {
+  const flow = (mode: 'vertical' | 'horizontal', padding: [number, number, number, number]) => ({
+    mode,
+    gap: 0,
+    padding,
+    align: 'start' as const,
+    justify: 'start' as const,
+    wrap: false,
+    widthSizing: 'fixed' as const,
+    heightSizing: 'hug' as const,
+  });
+  const { byId } = await render(
+    scene([
+      node('row', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 400, height: 40 },
+        layout: flow('horizontal', [0, 0, 0, 0]),
+        children: [
+          node('chip', {
+            position: 'flow',
+            bounds: { x: 0, y: 0, width: 77, height: 40 },
+            style: { opacity: 1, border: { color: red, width: 1 } },
+            layout: flow('vertical', [6, 16, 6, 16]),
+            children: [
+              node('label', {
+                kind: 'text',
+                position: 'flow',
+                bounds: { x: 17, y: 7, width: 43, height: 20 },
+                text: text('إكسسوار', { direction: 'rtl', align: 'right' }),
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('chip').layoutSizingHorizontal, 'HUG');
+  assert.equal(byId('label').layoutSizingHorizontal, 'HUG');
+  assert.equal(byId('label').textAutoResize, 'WIDTH_AND_HEIGHT');
+});
+
+test('a stacked sticky header that overlaps nothing keeps the page in auto layout', async () => {
+  const { byId } = await render(
+    scene([
+      node('page', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+        layout: {
+          mode: 'vertical',
+          gap: 0,
+          padding: [0, 0, 0, 0],
+          align: 'start',
+          justify: 'start',
+          wrap: false,
+          widthSizing: 'fixed',
+          heightSizing: 'hug',
+        },
+        children: [
+          node('header', {
+            position: 'flow',
+            bounds: { x: 0, y: 0, width: 400, height: 60 },
+            style: { opacity: 1, zIndex: 50 },
+          }),
+          node('main', { position: 'flow', bounds: { x: 0, y: 60, width: 400, height: 240 } }),
+        ],
+      }),
+    ]),
+  );
+  const page = byId('page');
+  assert.equal(page.layoutMode, 'VERTICAL');
+  assert.deepEqual(
+    page.children.map((c: { id: string }) => c.id),
+    [byId('header').id, byId('main').id],
+  );
+});

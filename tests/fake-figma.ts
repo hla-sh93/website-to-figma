@@ -67,6 +67,13 @@ class FakeNode {
   async setTextStyleIdAsync(id: string) {
     this.textStyleId = id;
   }
+  setGridChildPosition(row: number, column: number) {
+    this.gridRowAnchorIndex = row;
+    this.gridColumnAnchorIndex = column;
+  }
+  resizeWithoutConstraints(width: number, height: number) {
+    this.resize(width, height);
+  }
   set gridColumnCount(value: number) {
     this._columns = value;
     this.gridColumnSizes = Array.from({ length: value }, () => ({ type: 'FLEX', value: 1 }));
@@ -119,6 +126,11 @@ export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }])
     base64Decode: (value: string) => new Uint8Array(Buffer.from(value, 'base64')),
     createFrame() {
       const node = make('FRAME');
+      page.appendChild(node);
+      return node;
+    },
+    createSection() {
+      const node = make('SECTION');
       page.appendChild(node);
       return node;
     },
