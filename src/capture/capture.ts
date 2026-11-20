@@ -68,7 +68,8 @@ async function capture(
     if (input.url) {
       await assertPublicUrl(input.url);
       if (stop) throw new Error('Capture aborted');
-      proxy = await startEgressProxy({ maxBytes: 24 * 1024 * 1024 });
+      // Each width loads the page in its own tab, so the budget scales with widths.
+      proxy = await startEgressProxy({ maxBytes: 48 * 1024 * 1024 * widths.length });
       if (stop) {
         await proxy.close();
         throw new Error('Capture aborted');
@@ -132,29 +133,36 @@ async function capture(
     // tsx preserves function names with a helper when serializing the collector.
     await context.addInitScript('globalThis.__name = (value) => value');
     const bodies = new Map<string, { mime: string; body: Buffer }>();
+    // Image bodies arrive asynchronously; large photos can still be downloading
+    // when measurement finishes, so the capture waits for these before using them.
+    const pendingBodies = new Set<Promise<void>>();
     let bytes = 0,
       bytesLimited = false;
     const newCapturePage = async () => {
       const page = await context!.newPage();
       page.setDefaultTimeout(7000);
       page.on('download', (d) => void d.cancel());
-      page.on('response', async (response) => {
+      page.on('response', (response) => {
         if (!response.headers()['content-type']?.startsWith('image/')) return;
         if (bodies.has(response.url())) return;
-        try {
-          const body = await response.body();
-          if (bytes + body.length > MAX_IMAGE_BYTES) {
-            bytesLimited = true;
-            return;
-          }
-          bytes += body.length;
-          bodies.set(response.url(), {
-            mime: response.headers()['content-type']!.split(';')[0]!,
-            body,
-          });
-        } catch {}
+        const pending = readBody(response).finally(() => pendingBodies.delete(pending));
+        pendingBodies.add(pending);
       });
       return page;
+    };
+    const readBody = async (response: import('playwright').Response) => {
+      try {
+        const body = await response.body();
+        if (bytes + body.length > MAX_IMAGE_BYTES) {
+          bytesLimited = true;
+          return;
+        }
+        bytes += body.length;
+        bodies.set(response.url(), {
+          mime: response.headers()['content-type']!.split(';')[0]!,
+          body,
+        });
+      } catch {}
     };
     const result: ScenePackage = {
       version: 1,
@@ -241,11 +249,17 @@ async function capture(
               await sleep(100);
             }
             scrollTo(0, 0);
+            for (const video of document.querySelectorAll('video')) video.pause();
+          });
+          // Large photos decide their own height; measure only after they arrive.
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          await page.evaluate(async () => {
+            const timer = ((window as unknown as { __captureTimeout?: typeof setTimeout })
+              .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
             await Promise.race([
               Promise.all([...document.images].map((i) => i.decode().catch(() => {}))),
-              sleep(2000),
+              new Promise<void>((resolve) => timer(resolve, 6000)),
             ]);
-            for (const video of document.querySelectorAll('video')) video.pause();
           });
           // Dismiss only recognized cookie-rejection controls, never general page actions.
           for (const selector of ['#sp-cc-rejectall-link', '#onetrust-reject-all-handler']) {
@@ -506,6 +520,11 @@ async function capture(
                 ...(s.url.startsWith('http') ? { sourceUrl: s.url } : {}),
               });
           };
+          if (pendingBodies.size)
+            await Promise.race([
+              Promise.allSettled([...pendingBodies]),
+              new Promise((resolve) => setTimeout(resolve, 10000)),
+            ]);
           for (const s of data.sources) if (!s.mediaFrame) await processSource(s);
           const settledState = await fingerprint();
           if (settledState !== collectedState && attempt < 2) {
@@ -641,7 +660,13 @@ async function capture(
         message:
           'Image downloads beyond the capture budget were skipped; some images may be missing.',
       });
-    if (proxy?.blocked.length)
+    if (proxy?.limited)
+      result.issues.push({
+        code: 'network-budget',
+        severity: 'warning',
+        message: 'The page downloaded more than the capture budget; late resources were skipped.',
+      });
+    if (proxy?.blocked.length && !proxy.limited)
       result.issues.push({
         code: 'blocked-network',
         severity: 'warning',

@@ -14,6 +14,7 @@ export async function startEgressProxy(options: { resolver?: Resolver; maxBytes?
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
   let bytes = 0;
   let requests = 0;
+  let limited = false;
   const authorize = (headers: http.IncomingHttpHeaders) =>
     headers['proxy-authorization'] === expected;
   const count = (socket: net.Socket) => {
@@ -23,11 +24,15 @@ export async function startEgressProxy(options: { resolver?: Resolver; maxBytes?
     socket.on('error', () => {});
     socket.on('data', (chunk) => {
       bytes += chunk.length;
-      if (bytes > maxBytes) for (const active of sockets) active.destroy();
+      // Past the budget new destinations are refused; transfers already running
+      // finish. Only a runaway past twice the budget cuts every connection.
+      if (bytes > maxBytes) limited = true;
+      if (bytes > maxBytes * 2) for (const active of sockets) active.destroy();
     });
   };
   const target = async (input: string) => {
     if (++requests > 1500) throw new Error('Capture network request limit reached.');
+    if (limited) throw new Error('Capture network byte budget reached.');
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -123,6 +128,9 @@ export async function startEgressProxy(options: { resolver?: Resolver; maxBytes?
     username,
     password,
     blocked,
+    get limited() {
+      return limited;
+    },
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
