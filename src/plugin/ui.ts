@@ -161,7 +161,12 @@ async function capture() {
               ...(verificationUrl === 'fixture:features' ? { selector: '#features' } : {}),
             }
           : { url: $<HTMLInputElement>('url').value.trim() }),
-        widths: size === 'all' ? [1440, 768, 390] : [Number(size)],
+        widths:
+          size === 'all'
+            ? [1440, 768, 390]
+            : size === 'desktop-mobile'
+              ? [1440, 390]
+              : [Number(size)],
         theme: select('theme').value,
         ...(language === 'original' ? {} : { language }),
       }),

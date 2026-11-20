@@ -35,7 +35,7 @@ figma.ui.onmessage = async (message: unknown) => {
       const p = data.preferences as Record<string, unknown> | undefined;
       if (
         p &&
-        ['1440', '768', '390', 'all'].includes(String(p.size)) &&
+        ['1440', '768', '390', 'desktop-mobile', 'all'].includes(String(p.size)) &&
         ['light', 'dark'].includes(String(p.theme)) &&
         ['original', 'ar', 'en'].includes(String(p.language))
       )
