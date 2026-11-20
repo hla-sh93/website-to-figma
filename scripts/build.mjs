@@ -37,26 +37,37 @@ await build({
   globalName: 'WebsiteFidelity',
   target: 'es2020',
 });
-if (await readFile('src/plugin/main.ts', 'utf8').catch(() => null)) {
+// The shipped plugin excludes verification hooks; the diagnostic build keeps
+// them for owned-fixture and native acceptance runs.
+for (const [dir, diagnostics] of [
+  ['dist', false],
+  ['dist/diagnostic', true],
+]) {
+  await mkdir(dir, { recursive: true });
+  const define = { __DIAGNOSTICS__: String(diagnostics) };
   const client = await build({
     entryPoints: ['src/plugin/ui.ts'],
     bundle: true,
     format: 'iife',
     target: 'es2020',
+    define,
+    minifySyntax: true,
     write: false,
   });
   const ui = (await readFile('src/plugin/ui.html', 'utf8'))
     .replace('__BUILD_VERSION__', version)
     .replace('<!--SCRIPT-->', '<script>' + client.outputFiles[0].text + '</script>');
-  await writeFile('dist/ui.html', ui);
+  await writeFile(`${dir}/ui.html`, ui);
+  // Figma supplies __html__ from the manifest's ui file; do not embed it twice.
   await build({
     entryPoints: ['src/plugin/main.ts'],
-    outfile: 'dist/code.js',
+    outfile: `${dir}/code.js`,
     bundle: true,
     format: 'iife',
     target: 'es2020',
-    define: { __html__: JSON.stringify(ui) },
+    define,
+    minifySyntax: true,
   });
-  await copyFile('src/plugin/manifest.json', 'dist/manifest.json');
+  await copyFile('src/plugin/manifest.json', `${dir}/manifest.json`);
 }
-console.log('Built native renderer and available plugin entry points.');
+console.log('Built native renderer, shipped plugin and diagnostic plugin.');

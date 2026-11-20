@@ -41,6 +41,396 @@ export function collect(selector: string | undefined): {
     return value;
   };
   const px = (s: string) => parseFloat(s) || 0;
+  const NODE_BUDGET = 4000,
+    DEPTH_BUDGET = 100,
+    RASTER_BUDGET = 60;
+  let rasters = 0,
+    omitted = 0;
+  /** Nodes captured as screenshots: their pixels already include any transform. */
+  const flattened = new Set<string>();
+  type RGBA = { r: number; g: number; b: number; a: number };
+  type Shadow = {
+    color: RGBA;
+    x: number;
+    y: number;
+    blur: number;
+    spread: number;
+    inset?: boolean;
+  };
+  type Gradient = NonNullable<SceneNode['style']['gradients']>[number];
+  /** Splits a CSS list on top-level separators, ignoring those inside parentheses. */
+  const splitTop = (value: string, separator: ',' | ' ') => {
+    const parts: string[] = [];
+    let depth = 0,
+      token = '';
+    for (const ch of value) {
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      if (ch === separator && depth === 0) {
+        if (token.trim()) parts.push(token.trim());
+        token = '';
+      } else token += ch;
+    }
+    if (token.trim()) parts.push(token.trim());
+    return parts;
+  };
+  const isColor = (value: string) => {
+    if (!value || /^-?[\d.]/.test(value)) return false;
+    colorContext.fillStyle = '#010203';
+    colorContext.fillStyle = value;
+    return colorContext.fillStyle !== '#010203' || /^#010203$/i.test(value);
+  };
+  const shadows = (value: string, allowInset: boolean): Shadow[] | null => {
+    if (!value || value === 'none') return [];
+    const result: Shadow[] = [];
+    for (const layer of splitTop(value, ',')) {
+      const tokens = splitTop(layer, ' ');
+      const inset = tokens.includes('inset');
+      if (inset && !allowInset) return null;
+      const colorToken = tokens.find((t) => t !== 'inset' && isColor(t));
+      const lengths = tokens.filter((t) => t !== 'inset' && t !== colorToken).map(px);
+      if (lengths.length < 2 || lengths.length > 4) return null;
+      result.push({
+        color: color(colorToken ?? 'currentcolor'),
+        x: lengths[0]!,
+        y: lengths[1]!,
+        blur: Math.max(0, lengths[2] ?? 0),
+        spread: lengths[3] ?? 0,
+        ...(inset ? { inset: true } : {}),
+      });
+    }
+    return result;
+  };
+  /** Resolves one CSS gradient layer to unit-space geometry in a w × h box. */
+  const gradient = (layer: string, w: number, h: number): Gradient | null => {
+    const match = layer.match(/^(repeating-)?(linear|radial|conic)-gradient\((.*)\)$/s);
+    if (!match || w <= 0 || h <= 0) return null;
+    const kind = match[2] as 'linear' | 'radial' | 'conic';
+    const args = splitTop(match[3]!, ',');
+    let config = '';
+    if (args.length && !isColor(splitTop(args[0]!, ' ')[0]!)) config = args.shift()!;
+    const angleOf = (token: string) => {
+      const value = parseFloat(token);
+      return token.endsWith('grad')
+        ? value * 0.9
+        : token.endsWith('rad')
+          ? (value * 180) / Math.PI
+          : token.endsWith('turn')
+            ? value * 360
+            : value;
+    };
+    const point = (tokens: string[]): [number, number] => {
+      let x = w / 2,
+        y = h / 2;
+      const words = tokens.length === 1 ? [tokens[0]!, 'center'] : tokens.slice(0, 2);
+      if (/^(top|bottom)$/.test(words[0]!) || /^(left|right)$/.test(words[1]!)) words.reverse();
+      const axis = (token: string, size: number) =>
+        token === 'left' || token === 'top'
+          ? 0
+          : token === 'right' || token === 'bottom'
+            ? size
+            : token === 'center'
+              ? size / 2
+              : token.endsWith('%')
+                ? (parseFloat(token) / 100) * size
+                : px(token);
+      x = axis(words[0]!, w);
+      y = axis(words[1]!, h);
+      return [x, y];
+    };
+    let from: [number, number],
+      to: [number, number],
+      radius: [number, number] | undefined,
+      angle: number | undefined,
+      length: number;
+    const configTokens = splitTop(config, ' ');
+    if (kind === 'linear') {
+      let dx = 0,
+        dy = 1;
+      if (configTokens[0] === 'to') {
+        const sx = configTokens.includes('right') ? 1 : configTokens.includes('left') ? -1 : 0,
+          sy = configTokens.includes('bottom') ? 1 : configTokens.includes('top') ? -1 : 0;
+        [dx, dy] = sx && sy ? [sx * h, sy * w] : [sx, sy];
+      } else if (configTokens[0]) {
+        const theta = (angleOf(configTokens[0]) * Math.PI) / 180;
+        [dx, dy] = [Math.sin(theta), -Math.cos(theta)];
+      }
+      const norm = Math.hypot(dx, dy) || 1;
+      dx /= norm;
+      dy /= norm;
+      length = Math.abs(w * dx) + Math.abs(h * dy);
+      from = [(w / 2 - (dx * length) / 2) / w, (h / 2 - (dy * length) / 2) / h];
+      to = [(w / 2 + (dx * length) / 2) / w, (h / 2 + (dy * length) / 2) / h];
+    } else {
+      const at = configTokens.indexOf('at');
+      const center =
+        at >= 0 ? point(configTokens.slice(at + 1)) : ([w / 2, h / 2] as [number, number]);
+      const shapeTokens = at >= 0 ? configTokens.slice(0, at) : configTokens;
+      if (kind === 'conic') {
+        const fromIndex = shapeTokens.indexOf('from');
+        angle = fromIndex >= 0 ? angleOf(shapeTokens[fromIndex + 1] ?? '0deg') : 0;
+        const r = Math.max(w, h);
+        radius = [r / w, r / h];
+        length = 360;
+      } else {
+        const [cx, cy] = center;
+        const sides = [cx, w - cx, cy, h - cy];
+        const circle =
+          shapeTokens.includes('circle') ||
+          (shapeTokens.filter((t) => /px|%/.test(t)).length === 1 &&
+            !shapeTokens.includes('ellipse'));
+        const keyword =
+          shapeTokens.find((t) => /^(closest|farthest)-(side|corner)$/.test(t)) ??
+          'farthest-corner';
+        const explicit = shapeTokens.filter((t) => /^-?[\d.]+(px|%)$/.test(t));
+        let rx: number, ry: number;
+        if (explicit.length) {
+          rx = explicit[0]!.endsWith('%') ? (parseFloat(explicit[0]!) / 100) * w : px(explicit[0]!);
+          ry = explicit[1]
+            ? explicit[1].endsWith('%')
+              ? (parseFloat(explicit[1]) / 100) * h
+              : px(explicit[1])
+            : rx;
+        } else {
+          const fx = keyword.startsWith('farthest')
+              ? Math.max(sides[0]!, sides[1]!)
+              : Math.min(sides[0]!, sides[1]!),
+            fy = keyword.startsWith('farthest')
+              ? Math.max(sides[2]!, sides[3]!)
+              : Math.min(sides[2]!, sides[3]!);
+          if (circle) {
+            const r = keyword.endsWith('corner')
+              ? Math.hypot(fx, fy)
+              : keyword.startsWith('farthest')
+                ? Math.max(...sides)
+                : Math.min(...sides);
+            rx = ry = r;
+          } else if (keyword.endsWith('corner')) {
+            rx = fx * Math.SQRT2;
+            ry = fy * Math.SQRT2;
+          } else {
+            rx = fx;
+            ry = fy;
+          }
+        }
+        rx = Math.max(rx, 0.01);
+        ry = Math.max(ry, 0.01);
+        radius = [rx / w, ry / h];
+        length = rx;
+      }
+      from = [center[0] / w, center[1] / h];
+      to = [center[0] / w + radius[0], center[1] / h];
+    }
+    const stops: { position?: number; color: RGBA }[] = [];
+    for (const arg of args) {
+      const tokens = splitTop(arg, ' ');
+      const positions: string[] = [];
+      while (tokens.length > 1 && /^-?[\d.]+(%|px|deg|turn|rad|grad)?$/.test(tokens.at(-1)!))
+        positions.unshift(tokens.pop()!);
+      const value = tokens.join(' ');
+      if (!isColor(value)) continue; // colour hints are approximated by linear interpolation
+      const toUnit = (token: string) =>
+        token.endsWith('%')
+          ? parseFloat(token) / 100
+          : kind === 'conic'
+            ? angleOf(token) / 360
+            : px(token) / length;
+      const rgba = color(value);
+      if (!positions.length) stops.push({ color: rgba });
+      for (const position of positions) stops.push({ color: rgba, position: toUnit(position) });
+    }
+    if (stops.length < 2) return null;
+    stops[0]!.position ??= 0;
+    stops.at(-1)!.position ??= 1;
+    for (let i = 1; i < stops.length - 1; i++) {
+      if (stops[i]!.position !== undefined) continue;
+      let j = i;
+      while (stops[j]!.position === undefined) j++;
+      const start = stops[i - 1]!.position!,
+        end = stops[j]!.position!;
+      for (let k = i; k < j; k++)
+        stops[k]!.position = start + ((end - start) * (k - i + 1)) / (j - i + 1);
+    }
+    let previous = 0;
+    return {
+      kind,
+      from,
+      to,
+      ...(radius ? { radius } : {}),
+      ...(angle !== undefined ? { angle } : {}),
+      stops: stops.map((stop) => {
+        previous = Math.min(1, Math.max(previous, stop.position!, 0));
+        return { position: previous, color: stop.color };
+      }),
+    };
+  };
+  /** Paint-level style shared by elements and positioned pseudo-elements. */
+  const boxStyle = (c: CSSStyleDeclaration, w: number, h: number, id: string) => {
+    const style: SceneNode['style'] = {
+      opacity: px(c.opacity),
+      background: color(c.backgroundColor),
+      radius: [
+        px(c.borderTopLeftRadius),
+        px(c.borderTopRightRadius),
+        px(c.borderBottomRightRadius),
+        px(c.borderBottomLeftRadius),
+      ],
+    };
+    const sides = (['Top', 'Right', 'Bottom', 'Left'] as const).map((side) => {
+      const lineStyle = c.getPropertyValue(`border-${side.toLowerCase()}-style`);
+      return {
+        width: ['none', 'hidden'].includes(lineStyle)
+          ? 0
+          : px(c.getPropertyValue(`border-${side.toLowerCase()}-width`)),
+        color: c.getPropertyValue(`border-${side.toLowerCase()}-color`),
+        lineStyle,
+      };
+    });
+    const visible = sides.filter((side) => side.width > 0);
+    if (visible.length) {
+      const widest = visible.reduce((a, b) => (b.width > a.width ? b : a));
+      const uniform = visible.length === 4 && visible.every((side) => side.width === widest.width);
+      style.border = {
+        color: color(widest.color),
+        width: widest.width,
+        ...(uniform
+          ? {}
+          : { sides: sides.map((side) => side.width) as [number, number, number, number] }),
+        ...(widest.lineStyle === 'dashed' || widest.lineStyle === 'dotted'
+          ? { dash: widest.lineStyle as 'dashed' | 'dotted' }
+          : {}),
+      };
+      if (new Set(visible.map((side) => side.color)).size > 1)
+        issue(
+          id,
+          'border-colors-merged',
+          'Different border colours per side use the widest side colour.',
+        );
+    }
+    const boxShadows = shadows(c.boxShadow, true);
+    if (boxShadows === null)
+      issue(id, 'unsupported-effect', 'Shadow syntax is not represented by editable style.');
+    else if (boxShadows.length) style.shadow = boxShadows;
+    // Filters Figma can represent: layer blur, and colour filters on image paints.
+    if (c.filter !== 'none') {
+      const amount = (value: string) =>
+        value.endsWith('%') ? parseFloat(value) / 100 : parseFloat(value);
+      const filters: NonNullable<SceneNode['style']['imageFilters']> = {};
+      let supported = true;
+      for (const [, fn, arg] of c.filter.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
+        if (fn === 'blur') style.blur = px(arg!);
+        else if (fn === 'grayscale')
+          filters.saturation = Math.max(-1, (filters.saturation ?? 0) - Math.min(1, amount(arg!)));
+        else if (fn === 'saturate')
+          filters.saturation = Math.max(
+            -1,
+            Math.min(1, (filters.saturation ?? 0) + amount(arg!) - 1),
+          );
+        else if (fn === 'contrast') filters.contrast = Math.max(-1, Math.min(1, amount(arg!) - 1));
+        else if (fn === 'brightness')
+          filters.exposure = Math.max(-1, Math.min(1, amount(arg!) - 1));
+        else supported = false;
+      }
+      if (Object.keys(filters).length) style.imageFilters = filters;
+      if (!supported)
+        issue(
+          id,
+          'unsupported-effect',
+          'CSS filter other than blur and colour adjustments is visible only in the screenshot.',
+        );
+    }
+    const backdrop =
+      (c as CSSStyleDeclaration & { backdropFilter?: string }).backdropFilter ?? 'none';
+    const backdropBlur = backdrop.match(/^blur\(([\d.]+)px\)$/);
+    if (backdropBlur) style.backdropBlur = px(backdropBlur[1]!);
+    else if (backdrop !== 'none')
+      issue(id, 'unsupported-effect', 'Backdrop filter other than blur is not represented.');
+    // Background layers: CSS lists the topmost first; the background colour sits under all.
+    let url: string | undefined,
+      urlIndex = -1;
+    const above: Gradient[] = [],
+      below: Gradient[] = [];
+    const layers = c.backgroundImage === 'none' ? [] : splitTop(c.backgroundImage, ',');
+    const sizes = splitTop(c.backgroundSize, ',');
+    layers.forEach((layer, index) => {
+      const urlMatch = layer.match(/^url\("((?:\\.|[^"\\])*)"\)$/s);
+      if (urlMatch) {
+        if (url !== undefined) {
+          issue(id, 'unsupported-effect', 'Only one background image layer is editable.');
+          return;
+        }
+        url = urlMatch[1]!.replace(
+          /\\([0-9a-f]{1,6})\s?|\\(.)/gi,
+          (_m, hex: string | undefined, escaped: string) =>
+            hex ? String.fromCodePoint(Math.min(0x10ffff, parseInt(hex, 16))) : escaped,
+        );
+        urlIndex = index;
+        return;
+      }
+      const g = gradient(layer, w, h);
+      if (!g) {
+        issue(id, 'unsupported-effect', 'Background layer is not represented by editable style.');
+        return;
+      }
+      const size = (sizes[index] ?? sizes[0] ?? 'auto').trim();
+      if (!/^(auto|auto auto|100% 100%|cover)$/.test(size) || layer.startsWith('repeating-'))
+        issue(id, 'gradient-approximate', 'Sized or repeating gradient drawn once across the box.');
+      (url === undefined ? above : below).push(g);
+    });
+    return { style, url, urlIndex, above, below };
+  };
+  /** Clockwise rotation (degrees) and scale from a computed transform matrix. */
+  const rotationOf = (transform: string) => {
+    const m = transform.match(/^matrix\(([^)]+)\)$/);
+    if (!m) return null;
+    const [a, b, c2, d] = m[1]!.split(',').map(Number) as [number, number, number, number];
+    const sx = Math.hypot(a, b);
+    if (!sx) return null;
+    const sy = (a * d - b * c2) / sx;
+    if (Math.abs((a * c2 + b * d) / (sx * sx)) > 0.01) return null; // skew
+    const snap = (v: number) => (Math.abs(Math.abs(v) - 1) < 1e-3 ? Math.sign(v) : v);
+    return { rotation: (Math.atan2(b, a) * 180) / Math.PI, sx: snap(sx), sy: snap(sy) };
+  };
+  const contentString = (value: string) => {
+    const parts = value.match(/"(?:\\.|[^"\\])*"/g);
+    if (!parts || parts.join(' ').length !== value.trim().length) return null;
+    return parts.map((part) => part.slice(1, -1).replace(/\\(.)/g, '$1')).join('');
+  };
+  // Icon fonts are not installed in Figma; their glyphs are drawn to a sharp image instead.
+  const ICON_FONT =
+    /awesome|material (?:icons|symbols)|icomoon|ionicons|bootstrap-icons|remixicon|glyphicons|dashicons|feather|fontello|themify|simple-line-icons|boxicons|phosphor|tabler|icofont|flaticon|lineicons|unicons/i;
+  const PRIVATE_USE = /^[\uE000-\uF8FF\s]+$/;
+  const iconGlyph = (el: Element, c: CSSStyleDeclaration, r: DOMRect): string | null => {
+    if (el.children.length || r.width > 128 || r.height > 128) return null;
+    const parts: { text: string; style: CSSStyleDeclaration }[] = [];
+    for (const which of ['::before', '::after'] as const) {
+      const ps = getComputedStyle(el, which);
+      const value = contentString(ps.content);
+      if (value) parts.push({ text: value, style: ps });
+    }
+    const own = (el.textContent ?? '').trim();
+    if (own) parts.push({ text: own, style: c });
+    if (
+      !parts.length ||
+      !parts.every((p) => ICON_FONT.test(p.style.fontFamily) || PRIVATE_USE.test(p.text))
+    )
+      return null;
+    const scale = 4;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(r.width * scale));
+    canvas.height = Math.max(1, Math.round(r.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    for (const p of parts) {
+      const s = p.style;
+      context.font = `${s.fontStyle} ${s.fontWeight} ${px(s.fontSize) * scale}px ${s.fontFamily}`;
+      context.fillStyle = s.color;
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(p.text, canvas.width / 2, canvas.height / 2);
+    }
+    return canvas.toDataURL('image/png');
+  };
   const cssPath = (el: Element): string => {
     const parts: string[] = [];
     for (let current: Element | null = el; current; current = current.parentElement) {
@@ -141,11 +531,48 @@ export function collect(selector: string | undefined): {
   };
   const preservesSpaces = (c: CSSStyleDeclaration) =>
     c.whiteSpace.startsWith('pre') || c.whiteSpace === 'break-spaces';
-  const transformedText = (value: string, c: CSSStyleDeclaration) => {
-    if (c.textTransform === 'uppercase') return value.toUpperCase();
-    if (c.textTransform === 'lowercase') return value.toLowerCase();
-    if (c.textTransform === 'capitalize') return value.replace(/\b\p{L}/gu, (x) => x.toUpperCase());
-    return value;
+  // Characters stay as authored; Figma applies the case so later edits keep it.
+  const transformedText = (value: string, _c: CSSStyleDeclaration) => value;
+  const textCase = (c: CSSStyleDeclaration): { textCase?: 'upper' | 'lower' | 'title' } =>
+    c.textTransform === 'uppercase'
+      ? { textCase: 'upper' }
+      : c.textTransform === 'lowercase'
+        ? { textCase: 'lower' }
+        : c.textTransform === 'capitalize'
+          ? { textCase: 'title' }
+          : {};
+  const textShadow = (c: CSSStyleDeclaration) => {
+    const list = shadows(c.textShadow, false);
+    return list?.length ? { shadow: list } : {};
+  };
+  /** Replaces an element beyond the node/depth budget with a measured image. */
+  const raster = (el: Element, r: DOMRect, id: string): SceneNode | null => {
+    if (rasters >= RASTER_BUDGET) {
+      omitted++;
+      return null;
+    }
+    rasters++;
+    flattened.add(id);
+    sources.push({
+      nodeId: id,
+      kind: 'image',
+      url: 'frame:raster',
+      width: r.width,
+      height: r.height,
+      mediaFrame: true,
+    });
+    issue(id, 'raster-fallback', 'Deeply nested or very large content imported as an image.');
+    return {
+      id,
+      name: 'Image / ' + (el.getAttribute('aria-label') || el.tagName.toLowerCase()).slice(0, 80),
+      kind: 'image',
+      source: { tag: el.tagName.toLowerCase(), key: id },
+      bounds: { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height },
+      style: { opacity: 1 },
+      image: { fit: 'fill', position: [0.5, 0.5] },
+      position: 'flow',
+      children: [],
+    };
   };
   const measuredText = (el: Element, node: Node, id: string): SceneNode | null => {
     if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) return null;
@@ -183,6 +610,8 @@ export function collect(selector: string | undefined): {
         align: alignment(c),
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: 'inline',
+        ...textCase(c),
+        ...textShadow(c),
       },
     };
   };
@@ -192,11 +621,20 @@ export function collect(selector: string | undefined): {
     depth: number,
     includeDirect = false,
   ): SceneNode[] => {
-    if (depth > 65) throw new Error('Capture DOM node/depth budget exceeded');
+    if (depth > DEPTH_BUDGET) {
+      // Too deep for editable layers: keep each visible child as a measured image.
+      return [...el.children].flatMap((child, index) => {
+        const c = getComputedStyle(child),
+          r = child.getBoundingClientRect();
+        if (hidden(child, c) || !r.width || !r.height) return [];
+        const node = raster(child, r, path + '/' + index);
+        return node ? [node] : [];
+      });
+    }
     return [...el.childNodes].flatMap((child, index): SceneNode[] => {
       if (!(child instanceof Element)) {
         const text = includeDirect ? measuredText(el, child, path + '/direct-' + index) : null;
-        if (text && ++count > 2200) throw new Error('Capture DOM node/depth budget exceeded');
+        if (text) count++;
         return text ? [text] : [];
       }
       const c = getComputedStyle(child),
@@ -204,7 +642,7 @@ export function collect(selector: string | undefined): {
       if (hidden(child, c)) return [];
       const childPath = path + '/' + [...el.children].indexOf(child);
       if (!r.width || !r.height || c.display === 'contents') {
-        if (++count > 2200) throw new Error('Capture DOM node/depth budget exceeded');
+        count++;
         if (
           c.display !== 'contents' &&
           ((!r.width && c.overflowX !== 'visible') || (!r.height && c.overflowY !== 'visible'))
@@ -216,13 +654,224 @@ export function collect(selector: string | undefined): {
       return node ? [node] : [];
     });
   };
-  const build = (el: Element, path: string, depth: number): SceneNode | null => {
+  /** Builds a layer for a measurable ::before/::after box, 'empty' when it paints nothing. */
+  const pseudoBox = (
+    el: Element,
+    c: CSSStyleDeclaration,
+    r: DOMRect,
+    ps: CSSStyleDeclaration,
+    which: 'before' | 'after',
+    id: string,
+    text: string | null,
+  ): SceneNode | null | 'empty' => {
+    const w = px(ps.width),
+      h = px(ps.height);
+    const positioned = ps.position === 'absolute' || ps.position === 'fixed';
+    const nodeId = id + '/' + which;
+    const box = boxStyle(ps, Math.max(w, 1), Math.max(h, 1), nodeId);
+    const paints =
+      (box.style.background?.a ?? 0) > 0 ||
+      box.above.length > 0 ||
+      box.below.length > 0 ||
+      !!box.url ||
+      !!box.style.border ||
+      !!box.style.shadow?.length;
+    if (!paints && !text?.trim()) return 'empty';
+    if (!(w > 0 && h > 0)) return null;
+    const bl = px(c.borderLeftWidth),
+      bt = px(c.borderTopWidth);
+    let x: number, y: number;
+    if (positioned) {
+      if (ps.position === 'absolute' && c.position === 'static') return null;
+      x = ps.position === 'fixed' ? px(ps.left) : r.left + scrollX + bl + px(ps.left);
+      y = ps.position === 'fixed' ? px(ps.top) : r.top + scrollY + bt + px(ps.top);
+      x += px(ps.marginLeft);
+      y += px(ps.marginTop);
+    } else {
+      // A block-level pseudo box in a block container sits at the content edge.
+      if (
+        !/^(block|list-item|flow-root)$/.test(c.display) ||
+        !/^(block|inline-block|flex|grid)$/.test(ps.display)
+      )
+        return null;
+      const rtl = c.direction === 'rtl';
+      const contentLeft = r.left + scrollX + bl + px(c.paddingLeft),
+        contentRight = r.right + scrollX - px(c.borderRightWidth) - px(c.paddingRight);
+      x = rtl ? contentRight - w - px(ps.marginRight) : contentLeft + px(ps.marginLeft);
+      y =
+        which === 'before'
+          ? r.top + scrollY + bt + px(c.paddingTop) + px(ps.marginTop)
+          : r.bottom +
+            scrollY -
+            px(c.borderBottomWidth) -
+            px(c.paddingBottom) -
+            h -
+            px(ps.marginBottom);
+    }
+    const style: SceneNode['style'] = {
+      ...box.style,
+      zIndex: ps.zIndex === 'auto' ? 0 : parseInt(ps.zIndex, 10) || 0,
+      ...(box.above.length || box.below.length ? { gradients: [...box.above, ...box.below] } : {}),
+    };
+    let bounds = { x, y, width: w, height: h };
+    if (ps.transform !== 'none') {
+      const m = ps.transform.match(/^matrix\(([^)]+)\)$/);
+      const t = rotationOf(ps.transform);
+      if (!m || !t) return null;
+      const values = m[1]!.split(',').map(Number);
+      const tx = values[4] ?? 0,
+        ty = values[5] ?? 0;
+      const origin = ps.transformOrigin.split(' ').map(px);
+      const ox = origin[0] ?? w / 2,
+        oy = origin[1] ?? h / 2;
+      // Map the box centre through the transform about its origin.
+      const [a, b, c2, d] = values as [number, number, number, number];
+      const cx0 = w / 2 - ox,
+        cy0 = h / 2 - oy;
+      const cx = x + ox + a * cx0 + c2 * cy0 + tx,
+        cy = y + oy + b * cx0 + d * cy0 + ty;
+      const sw = w * t.sx,
+        sh = h * Math.abs(t.sy);
+      const theta = (t.rotation * Math.PI) / 180;
+      const W = Math.abs(sw * Math.cos(theta)) + Math.abs(sh * Math.sin(theta)),
+        H = Math.abs(sw * Math.sin(theta)) + Math.abs(sh * Math.cos(theta));
+      bounds = { x: cx - W / 2, y: cy - H / 2, width: W, height: H };
+      if (Math.abs(t.rotation) >= 0.5) {
+        style.rotation = t.rotation;
+        style.size = { width: sw, height: sh };
+      }
+    }
+    const node: SceneNode = {
+      id: nodeId,
+      name: 'Decoration / ' + which,
+      kind: 'frame',
+      source: { tag: '::' + which },
+      bounds,
+      style,
+      position: 'absolute',
+      children: [],
+    };
+    if (box.url && !box.above.length && !box.below.length) {
+      node.kind = 'image';
+      node.image = {
+        fit: 'none',
+        position: [0, 0],
+        contentBox: { x: 0, y: 0, width: bounds.width, height: bounds.height },
+      };
+      sources.push({
+        nodeId,
+        kind: 'image',
+        url: box.url,
+        width: 0,
+        height: 0,
+        objectPosition: ps.backgroundPosition,
+        background: { size: ps.backgroundSize, repeat: ps.backgroundRepeat },
+      });
+      return node;
+    }
+    if (text?.trim()) {
+      const spec: NonNullable<SceneNode['text']> = {
+        characters: text,
+        fontFamily: ps.fontFamily,
+        fontStyle: ps.fontStyle,
+        fontWeight: px(ps.fontWeight) || 400,
+        fontSize: px(ps.fontSize),
+        lineHeight: lineHeight(ps, text),
+        letterSpacing: px(ps.letterSpacing),
+        color: color(ps.color),
+        align: ps.textAlign === 'center' || ps.display.includes('flex') ? 'center' : alignment(ps),
+        direction: ps.direction === 'rtl' ? 'rtl' : 'ltr',
+        sizing: 'block',
+        ...textCase(ps),
+      };
+      if (!paints) {
+        node.kind = 'text';
+        node.text = spec;
+        node.style = { opacity: style.opacity, zIndex: style.zIndex };
+      } else
+        node.children = [
+          {
+            id: nodeId + '/text',
+            name: 'Decoration text',
+            kind: 'text',
+            source: { tag: '#text' },
+            bounds: { ...bounds },
+            style: { opacity: 1 },
+            position: 'absolute',
+            children: [],
+            text: spec,
+          },
+        ];
+    }
+    return node;
+  };
+  // Boxes whose width comes from their content in CSS (inline boxes, floats,
+  // non-growing items of a flex row) become hugging frames in Figma.
+  const shrinkWrapped = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
+    if (/^inline/.test(c.display) || c.float !== 'none') return true;
+    // Absolute boxes exactly as wide as their content (plus padding) were shrink-wrapped.
+    if ((c.position === 'absolute' || c.position === 'fixed') && n.children.length) {
+      const left = Math.min(...n.children.map((child) => child.bounds.x));
+      const right = Math.max(...n.children.map((child) => child.bounds.x + child.bounds.width));
+      const box =
+        right -
+        left +
+        px(c.paddingLeft) +
+        px(c.paddingRight) +
+        px(c.borderLeftWidth) +
+        px(c.borderRightWidth);
+      if (Math.abs(r.width - box) <= 1) return true;
+    }
+    const parent = el.parentElement ? getComputedStyle(el.parentElement) : undefined;
+    return (
+      !!parent &&
+      /flex/.test(parent.display) &&
+      parent.flexDirection.startsWith('row') &&
+      c.flexGrow === '0'
+    );
+  };
+  // Boxes sized by their container (absolute insets, stretched flex/grid items,
+  // min-height) are taller than their content; hugging would collapse them.
+  const stretchedHeight = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
+    const flow = n.children.filter(
+      (child) => child.position !== 'absolute' && child.source.tag !== '#background',
+    );
+    if (!flow.length) return false;
+    const top = Math.min(...flow.map((child) => child.bounds.y));
+    const bottom = Math.max(...flow.map((child) => child.bounds.y + child.bounds.height));
+    const content =
+      bottom -
+      top +
+      px(c.paddingTop) +
+      px(c.paddingBottom) +
+      px(c.borderTopWidth) +
+      px(c.borderBottomWidth);
+    if (r.height - content <= 1.5) return false;
+    const parent = el.parentElement ? getComputedStyle(el.parentElement).display : '';
+    return (
+      c.position === 'absolute' ||
+      c.position === 'fixed' ||
+      /flex|grid/.test(parent) ||
+      px(c.minHeight) > 0
+    );
+  };
+  const buildElement = (el: Element, path: string, depth: number): SceneNode | null => {
     const c = getComputedStyle(el),
       r = el.getBoundingClientRect();
     if (hidden(el, c) || !r.width || !r.height || r.top + scrollY >= 16000) return null;
-    if (++count > 2200 || depth > 65) throw new Error('Capture DOM node/depth budget exceeded');
+    if (++count > NODE_BUDGET || depth > DEPTH_BUDGET) return raster(el, r, path);
     const key = el.getAttribute('data-figma-id') || el.id || path,
       id = path;
+    const box = boxStyle(c, r.width, r.height, id);
+    const clipText = /text/.test(
+      c.backgroundClip + ' ' + c.getPropertyValue('-webkit-background-clip'),
+    );
+    const backgroundUrl = clipText ? undefined : box.url;
+    if (clipText && box.url)
+      issue(id, 'unsupported-effect', 'Image-clipped text keeps its solid text colour.');
+    const elementGradients = backgroundUrl ? box.below : box.above;
+    const overlayGradients = backgroundUrl ? box.above : [];
+    const textGradients = clipText ? [...box.above, ...box.below] : [];
     const n: SceneNode = {
       id,
       name: (
@@ -250,65 +899,59 @@ export function collect(selector: string | undefined): {
         .replace(/\s+/g, ' ')
         .slice(0, 100),
       kind: 'frame',
-      source: { tag: el.tagName.toLowerCase(), key },
+      source: {
+        tag: el.tagName.toLowerCase(),
+        key,
+        ...(el.getAttribute('role') ? { role: el.getAttribute('role')!.split(' ')[0]! } : {}),
+      },
       bounds: { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: r.height },
       style: {
-        opacity: px(c.opacity),
+        ...box.style,
         ...(c.zIndex !== 'auto'
           ? { zIndex: parseInt(c.zIndex, 10) }
           : c.position !== 'static'
             ? { zIndex: 0 }
             : {}),
-        background: color(c.backgroundColor),
-        radius: [
-          px(c.borderTopLeftRadius),
-          px(c.borderTopRightRadius),
-          px(c.borderBottomRightRadius),
-          px(c.borderBottomLeftRadius),
-        ],
+        ...(elementGradients.length && !clipText ? { gradients: elementGradients } : {}),
         clipContent: c.overflowX !== 'visible' || c.overflowY !== 'visible',
       },
       children: [],
       position: c.position === 'absolute' || c.position === 'fixed' ? 'absolute' : 'flow',
     };
-    if (px(c.borderTopWidth))
-      n.style.border = { width: px(c.borderTopWidth), color: color(c.borderTopColor) };
-    if (c.transform !== 'none')
+    if (c.transform !== 'none' && !rotationOf(c.transform))
       issue(
         id,
         'transform',
-        'Transform is retained as measured bounds; editable transform and rotated child geometry are approximated.',
+        'Skewed or 3D transform is retained as measured bounds; editable geometry is approximated.',
       );
-    if (c.boxShadow !== 'none') {
-      const m = c.boxShadow.match(
-        /^(rgba?\([^)]+\)) (-?[\d.]+)px (-?[\d.]+)px ([\d.]+)px (-?[\d.]+)px$/,
-      );
-      if (m)
-        n.style.shadow = [
-          { color: color(m[1]!), x: px(m[2]!), y: px(m[3]!), blur: px(m[4]!), spread: px(m[5]!) },
-        ];
-      else
+    // Generated content: positioned boxes become layers, inline strings join the text.
+    const pseudoNodes: { before: SceneNode[]; after: SceneNode[] } = { before: [], after: [] };
+    const inlinePseudo: Partial<
+      Record<'before' | 'after', { text: string; style: CSSStyleDeclaration }>
+    > = {};
+    for (const which of ['before', 'after'] as const) {
+      const ps = getComputedStyle(el, '::' + which);
+      if (ps.content === 'none' || ps.content === 'normal' || ps.display === 'none') continue;
+      if (ps.visibility === 'hidden' || Number(ps.opacity) === 0) continue;
+      const text = contentString(ps.content);
+      const positioned = ps.position === 'absolute' || ps.position === 'fixed';
+      if (!positioned && ps.display.startsWith('inline')) {
+        // Inline strings (labels, quotes, icon-font glyphs) join the element's text.
+        if (text !== null) {
+          if (text) inlinePseudo[which] = { text, style: ps };
+          continue;
+        }
         issue(
           id,
-          'unsupported-effect',
-          'Complex or inset shadow is not represented by editable style.',
+          'pseudo-content',
+          'Generated pseudo content is visible in screenshot but not editable.',
         );
-    }
-    const backgroundMatch = c.backgroundImage.match(/^url\("((?:\\.|[^"\\])*)"\)$/s);
-    const backgroundUrl = backgroundMatch?.[1]?.replace(
-      /\\([0-9a-f]{1,6})\s?|\\(.)/gi,
-      (_match, hex: string | undefined, escaped: string) =>
-        hex ? String.fromCodePoint(Math.min(0x10ffff, parseInt(hex, 16))) : escaped,
-    );
-    if ((c.backgroundImage !== 'none' && !backgroundUrl) || c.filter !== 'none')
-      issue(
-        id,
-        'unsupported-effect',
-        'Background image/gradient, shadow, or filter is not represented by editable style.',
-      );
-    for (const pseudo of ['::before', '::after']) {
-      const s = getComputedStyle(el, pseudo);
-      if (s.content !== 'none' && s.content !== 'normal')
+        continue;
+      }
+      const decoration = pseudoBox(el, c, r, ps, which, id, text);
+      if (decoration === 'empty') continue;
+      if (decoration) pseudoNodes[which].push(decoration);
+      else
         issue(
           id,
           'pseudo-content',
@@ -326,6 +969,7 @@ export function collect(selector: string | undefined): {
         height: r.height,
         mediaFrame: true,
       });
+      flattened.add(id);
       issue(
         id,
         'media-static-frame',
@@ -335,6 +979,22 @@ export function collect(selector: string | undefined): {
     }
     if (['CANVAS', 'IFRAME'].includes(el.tagName))
       issue(id, 'unsupported-media', 'Dynamic media is present only in the source screenshot.');
+    const glyph = iconGlyph(el, c, r);
+    if (glyph) {
+      n.kind = 'image';
+      n.name = 'Icon';
+      n.children = [];
+      sources.push({
+        nodeId: id,
+        kind: 'image',
+        url: glyph,
+        width: Math.round(r.width * 4),
+        height: Math.round(r.height * 4),
+      });
+      n.image = { fit: 'fill', position: [0.5, 0.5] };
+      flattened.add(id);
+      return n;
+    }
     if (el instanceof HTMLImageElement) {
       n.kind = 'image';
       sources.push({
@@ -423,7 +1083,27 @@ export function collect(selector: string | undefined): {
               : match;
           });
           if (index === 0 && property === 'opacity') value = '1';
-          if (value && !/url\((?!["']?#)/i.test(value)) copy.style.setProperty(property, value);
+          if (!value || /url\((?!["']?#)/i.test(value)) continue;
+          // Presentation attributes import more reliably than long inline style
+          // declarations; computed values already resolve currentColor and classes.
+          if (property === 'color') continue;
+          if (
+            /^(font-|text-anchor|dominant-baseline)/.test(property) &&
+            !/^(text|tspan|textPath)$/i.test(original.tagName)
+          )
+            continue;
+          if (property === 'display') {
+            if (value === 'none') copy.setAttribute('display', 'none');
+            continue;
+          }
+          if (property === 'visibility') {
+            if (value !== 'visible') copy.setAttribute('visibility', value);
+            continue;
+          }
+          if (/^(stroke-width|stroke-dashoffset|stroke-miterlimit|font-size)$/.test(property))
+            value = value.replace(/px$/, '');
+          if (property === 'stroke-dasharray') value = value.replace(/px/g, '');
+          copy.setAttribute(property, value);
         }
       });
       clone
@@ -535,7 +1215,13 @@ export function collect(selector: string | undefined): {
         !['inline', 'inline-block', 'contents'].includes(getComputedStyle(e).display) &&
         e.tagName !== 'BR',
     );
-    if (!hasBlock && !hasAsset && (el.textContent ?? '').trim()) {
+    if (
+      !hasBlock &&
+      !hasAsset &&
+      ((el.textContent ?? '').trim() ||
+        inlinePseudo.before?.text.trim() ||
+        inlinePseudo.after?.text.trim())
+    ) {
       n.kind = 'text';
       let characters = '';
       const runs: NonNullable<NonNullable<SceneNode['text']>['runs']> = [];
@@ -560,7 +1246,9 @@ export function collect(selector: string | undefined): {
             characters += '\n';
             return;
           }
+          if (node !== el) addPseudo('before', node);
           node.childNodes.forEach(add);
+          if (node !== el) addPseudo('after', node);
           return;
         }
         if (node.nodeType !== Node.TEXT_NODE) return;
@@ -588,9 +1276,39 @@ export function collect(selector: string | undefined): {
             letterSpacing: px(style.letterSpacing),
             lineHeight: lineHeight(style, s),
             ...(variations(style) ? { variationSettings: variations(style) } : {}),
+            ...textCase(style),
           });
       };
+      const addPseudo = (which: 'before' | 'after', owner?: Element) => {
+        let pseudo = owner ? undefined : inlinePseudo[which];
+        if (owner) {
+          // Inline descendants (links, labels) contribute their generated strings too.
+          const ps = getComputedStyle(owner, '::' + which);
+          const value =
+            ps.content === 'none' || ps.content === 'normal' ? null : contentString(ps.content);
+          if (value && ps.display.startsWith('inline') && !/absolute|fixed/.test(ps.position))
+            pseudo = { text: value, style: ps };
+        }
+        if (!pseudo) return;
+        const style = pseudo.style;
+        const start = characters.length;
+        characters += pseudo.text;
+        runs.push({
+          start,
+          end: characters.length,
+          fontFamily: style.fontFamily,
+          fontStyle: style.fontStyle,
+          fontWeight: px(style.fontWeight) || 400,
+          fontSize: px(style.fontSize),
+          color: color(style.color),
+          letterSpacing: px(style.letterSpacing),
+          lineHeight: lineHeight(style, pseudo.text),
+          ...textCase(style),
+        });
+      };
+      addPseudo('before');
       el.childNodes.forEach(add);
+      addPseudo('after');
       if (!preservesSpaces(c)) characters = characters.trimEnd();
       runs.forEach((t) => (t.end = Math.min(t.end, characters.length)));
       const textRange = document.createRange();
@@ -637,6 +1355,8 @@ export function collect(selector: string | undefined): {
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: intrinsicText ? 'inline' : 'block',
         ...(c.textOverflow === 'ellipsis' && c.whiteSpace === 'nowrap' ? { maxLines: 1 } : {}),
+        ...textCase(c),
+        ...textShadow(c),
         runs: runs.filter((t) => t.end > t.start),
       };
       const decorated =
@@ -644,6 +1364,9 @@ export function collect(selector: string | undefined): {
         (n.style.background?.a ?? 0) > 0 ||
         !!n.style.border ||
         !!n.style.shadow ||
+        !!n.style.gradients?.length ||
+        !!n.style.backdropBlur ||
+        pseudoNodes.before.length + pseudoNodes.after.length > 0 ||
         [c.paddingTop, c.paddingRight, c.paddingBottom, c.paddingLeft].some((v) => px(v) > 0);
       if (decorated) {
         const child: SceneNode = {
@@ -651,7 +1374,9 @@ export function collect(selector: string | undefined): {
           id: id + '/text',
           name: n.name + ' text',
           source: { tag: '#text' },
-          style: { opacity: 1 },
+          // The label flows inside its box even when the box itself is positioned.
+          position: 'flow',
+          style: { opacity: 1, ...(textGradients.length ? { gradients: textGradients } : {}) },
           children: [],
           bounds: {
             x: n.bounds.x + px(c.borderLeftWidth) + px(c.paddingLeft),
@@ -679,6 +1404,7 @@ export function collect(selector: string | undefined): {
         n.children = [child];
         textSources.push({ nodeId: child.id, selector: cssPath(el) });
       } else {
+        if (textGradients.length) n.style.gradients = textGradients;
         textSources.push({ nodeId: n.id, selector: cssPath(el) });
         return n;
       }
@@ -705,7 +1431,7 @@ export function collect(selector: string | undefined): {
     const flex = c.display.includes('flex'),
       grid = c.display.includes('grid'),
       horizontal = flex && c.flexDirection.startsWith('row');
-    const align =
+    const crossAlign =
       c.alignItems === 'center'
         ? 'center'
         : c.alignItems.includes('end')
@@ -713,6 +1439,15 @@ export function collect(selector: string | undefined): {
           : c.alignItems === 'stretch'
             ? 'stretch'
             : 'start';
+    // In a right-to-left column the inline start is the right edge.
+    const align =
+      c.direction === 'rtl' && !horizontal && !grid
+        ? crossAlign === 'start'
+          ? 'end'
+          : crossAlign === 'end'
+            ? 'start'
+            : crossAlign
+        : crossAlign;
     let gap = px(horizontal || grid ? c.columnGap : c.rowGap);
     if (!flex && !grid && n.children.length > 1) {
       const gaps = n.children
@@ -752,9 +1487,14 @@ export function collect(selector: string | undefined): {
               px(getComputedStyle(el.parentElement).borderRightWidth)),
         ) < 1
           ? 'fill'
-          : 'fixed',
+          : shrinkWrapped(el, c, r, n)
+            ? 'hug'
+            : 'fixed',
       heightSizing:
-        !(el as HTMLElement).style.height && c.display !== 'inline' && n.children.length > 0
+        !(el as HTMLElement).style.height &&
+        c.display !== 'inline' &&
+        n.children.length > 0 &&
+        !stretchedHeight(el, c, r, n)
           ? 'hug'
           : 'fixed',
       ...(grid ? { columns: c.gridTemplateColumns.split(' ').filter(Boolean).length } : {}),
@@ -786,6 +1526,9 @@ export function collect(selector: string | undefined): {
         /\[|subgrid|masonry/.test(c.gridTemplateColumns) ||
         [...el.children].some((child) => {
           const style = getComputedStyle(child);
+          // Empty or hidden items (sentinels, spacers) are not imported and cannot move others.
+          const box = child.getBoundingClientRect();
+          if (hidden(child, style) || !box.width || !box.height) return false;
           return [
             style.gridColumnStart,
             style.gridColumnEnd,
@@ -811,6 +1554,30 @@ export function collect(selector: string | undefined): {
         'grid-tracks-inferred',
         'Grid track proportions are inferred from this viewport; fixed versus flexible track behavior requires resize review.',
       );
+    if (pseudoNodes.before.length || pseudoNodes.after.length)
+      n.children = [...pseudoNodes.before, ...n.children, ...pseudoNodes.after];
+    // Right-to-left rows and grids flow from the right edge. Figma auto layout always
+    // flows left to right, so in-flow children are stored in visual order instead.
+    if (c.direction === 'rtl' && (n.layout.mode === 'horizontal' || n.layout.mode === 'grid')) {
+      const inFlow = (child: SceneNode) =>
+        child.position !== 'absolute' && child.source.tag !== '#background';
+      const visual = n.children
+        .filter(inFlow)
+        .sort((a, b) =>
+          n.layout!.mode === 'grid' || n.layout!.wrap
+            ? Math.round(a.bounds.y) - Math.round(b.bounds.y) || a.bounds.x - b.bounds.x
+            : a.bounds.x - b.bounds.x,
+        );
+      let next = 0;
+      n.children = n.children.map((child) => (inFlow(child) ? visual[next++]! : child));
+      if (n.layout.mode === 'horizontal')
+        n.layout.justify =
+          n.layout.justify === 'start'
+            ? 'end'
+            : n.layout.justify === 'end'
+              ? 'start'
+              : n.layout.justify;
+    }
     if (backgroundUrl) {
       const inset =
         c.backgroundOrigin === 'border-box'
@@ -838,6 +1605,7 @@ export function collect(selector: string | undefined): {
           ...(n.style.radius
             ? { radius: [...n.style.radius] as [number, number, number, number] }
             : {}),
+          ...(overlayGradients.length ? { gradients: overlayGradients } : {}),
         },
         position: 'absolute',
         children: [],
@@ -859,15 +1627,47 @@ export function collect(selector: string | undefined): {
         url: backgroundUrl,
         width: 0,
         height: 0,
-        objectPosition: c.backgroundPosition,
-        background: { size: c.backgroundSize, repeat: c.backgroundRepeat },
+        objectPosition: splitTop(c.backgroundPosition, ',')[box.urlIndex] ?? c.backgroundPosition,
+        background: {
+          size: splitTop(c.backgroundSize, ',')[box.urlIndex] ?? c.backgroundSize,
+          repeat: splitTop(c.backgroundRepeat, ',')[box.urlIndex] ?? c.backgroundRepeat,
+        },
       });
     }
     return n;
+  };
+  /** Leaf layers rotate natively; rotated containers keep measured child positions. */
+  const build = (el: Element, path: string, depth: number): SceneNode | null => {
+    const node = buildElement(el, path, depth);
+    if (!node || flattened.has(node.id)) return node;
+    const transform = getComputedStyle(el).transform;
+    const t = transform === 'none' ? null : rotationOf(transform);
+    if (!t || Math.abs(t.rotation) < 0.5) return node;
+    const leaf = node.kind !== 'frame' || node.children.length === 0;
+    const element = el as HTMLElement;
+    const width = element.offsetWidth ?? el.clientWidth,
+      height = element.offsetHeight ?? el.clientHeight;
+    if (!leaf || !width || !height) {
+      issue(
+        node.id,
+        'transform',
+        'Rotated container keeps measured child positions; its rotation is approximated.',
+      );
+      return node;
+    }
+    node.style.rotation = t.rotation;
+    node.style.size = { width: width * t.sx, height: height * Math.abs(t.sy) };
+    return node;
   };
   const el = selector ? document.querySelector(selector) : document.body;
   if (!el) throw new Error('Capture selector was not found');
   const root = build(el, 'root', 0);
   if (!root) throw new Error('Capture selector is not visible');
+  if (omitted)
+    issues.push({
+      code: 'content-omitted',
+      severity: 'warning',
+      message: `${omitted} deeply nested or over-budget region(s) were left out of the editable layers.`,
+    });
   return { root, issues, sources, textSources };
 }
