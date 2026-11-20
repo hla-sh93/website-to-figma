@@ -231,15 +231,19 @@ async function capture(
               '[PAGE_BLOCKED] الموقع عرض صفحة تحقق أو حاجز وصول بدلاً من الصفحة المطلوبة. يلزم التقاط الصفحة من المتصفح بعد فتحها.',
             );
           await page.evaluate(async () => {
-            await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 3000))]);
+            // After a freeze, page timers are disabled; use the capture's saved timer.
+            const timer = ((window as unknown as { __captureTimeout?: typeof setTimeout })
+              .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
+            const sleep = (ms: number) => new Promise<void>((resolve) => timer(resolve, ms));
+            await Promise.race([document.fonts.ready, sleep(3000)]);
             for (let y = 0; y < Math.min(document.documentElement.scrollHeight, 16000); y += 800) {
               scrollTo(0, y);
-              await new Promise((r) => setTimeout(r, 100));
+              await sleep(100);
             }
             scrollTo(0, 0);
             await Promise.race([
               Promise.all([...document.images].map((i) => i.decode().catch(() => {}))),
-              new Promise((r) => setTimeout(r, 2000)),
+              sleep(2000),
             ]);
             for (const video of document.querySelectorAll('video')) video.pause();
           });
@@ -309,7 +313,9 @@ async function capture(
           visit(data.root);
           await inspectFonts(page, data.textSources, nodes, data.issues);
           for (const issue of data.issues) local.issues.push({ ...issue, screenId });
-          for (const s of data.sources) {
+          // Image work runs first; screenshot-based media frames run after the change check,
+          // because full-page screenshots resize the viewport and can disturb the page.
+          const processSource = async (s: (typeof data.sources)[number]) => {
             const n = nodes.get(s.nodeId)!;
             if (n.image && s.objectPosition) {
               const position = parseObjectPosition(s.objectPosition);
@@ -347,7 +353,7 @@ async function capture(
                     body: await page.screenshot({
                       clip,
                       fullPage: true,
-                      animations: 'disabled',
+                      animations: 'allow',
                       timeout: 10000,
                     }),
                   };
@@ -381,7 +387,7 @@ async function capture(
                 screenId,
                 nodeId: n.id,
               });
-              continue;
+              return;
             }
             // SVG response images are sanitized using the browser DOM before packaging.
             if (asset.mime === 'image/svg+xml') {
@@ -423,7 +429,7 @@ async function capture(
                   screenId,
                   nodeId: n.id,
                 });
-                continue;
+                return;
               }
             }
             if (s.kind === 'image' && asset.mime !== 'image/svg+xml') {
@@ -449,7 +455,7 @@ async function capture(
                   screenId,
                   nodeId: n.id,
                 });
-                continue;
+                return;
               }
             }
             if (s.background && n.image) {
@@ -484,7 +490,7 @@ async function capture(
                   screenId,
                   nodeId: n.id,
                 });
-                continue;
+                return;
               }
             }
             const id = s.kind + '-' + createHash('sha256').update(asset.body).digest('hex');
@@ -499,7 +505,17 @@ async function capture(
                 height: s.height,
                 ...(s.url.startsWith('http') ? { sourceUrl: s.url } : {}),
               });
+          };
+          for (const s of data.sources) if (!s.mediaFrame) await processSource(s);
+          const settledState = await fingerprint();
+          if (settledState !== collectedState && attempt < 2) {
+            local.assets.length = assetCount;
+            local.issues.length = issueCount;
+            // Motion the fingerprint missed (canvas, video, timers): freeze before retrying.
+            await page.evaluate(freezePage);
+            continue;
           }
+          for (const s of data.sources) if (s.mediaFrame) await processSource(s);
           const fullHeight = await page.evaluate(() => document.documentElement.scrollHeight);
           const clip = o.selector
             ? data.root.bounds
@@ -560,22 +576,18 @@ async function capture(
           const screenshot = await page.screenshot({
             clip,
             fullPage: true,
-            animations: 'disabled',
+            animations: 'allow',
             timeout: 10000,
           });
-          if ((await fingerprint()) !== collectedState) {
-            local.assets.length = assetCount;
-            local.issues.length = issueCount;
-            if (attempt < 2) continue;
+          if ((await fingerprint()) !== settledState)
             // The scene is one synchronous snapshot; only the reference screenshot may differ.
             local.issues.push({
               code: 'screenshot-drift',
               severity: 'warning',
               message:
-                'The page changed between measurement and screenshot; the reference image may differ.',
+                'The page changed while the reference screenshot was taken; it may differ from the layers.',
               screenId,
             });
-          }
           local.screens.push({
             id: screenId,
             viewport: { width, height, dpr: 1 },
@@ -635,7 +647,15 @@ async function capture(
         severity: 'warning',
         message: 'One or more network destinations were blocked by public-address policy.',
       });
-    return validateScene(result);
+    try {
+      return validateScene(result);
+    } catch (error) {
+      if (process.env.CAPTURE_DEBUG_FILE)
+        await import('node:fs/promises').then((fs) =>
+          fs.writeFile(process.env.CAPTURE_DEBUG_FILE!, JSON.stringify(result)),
+        );
+      throw error;
+    }
   };
   try {
     return await Promise.race([
