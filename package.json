@@ -10,7 +10,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:browser": "tsx --test tests/browser/*.test.ts",
+    "test:browser": "tsx --test --test-timeout=180000 tests/browser/*.test.ts",
     "check": "npm run format:check && npm run typecheck && npm test && npm run build && npm run test:browser",
     "format": "prettier --write src tests scripts package.json tsconfig.json .prettierrc.json .github",
     "format:check": "prettier --check src tests scripts package.json tsconfig.json .prettierrc.json .github",
