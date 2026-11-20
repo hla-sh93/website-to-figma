@@ -106,6 +106,8 @@ export type SceneNode = {
     clipContent?: boolean;
     shadow?: Shadow[];
     blur?: number;
+    /** CSS colour filters applied to images inside this box (Figma image filters, -1..1). */
+    imageFilters?: { saturation?: number; contrast?: number; exposure?: number };
     backdropBlur?: number;
     /** Degrees clockwise around the centre of bounds; bounds stay the axis-aligned box. */
     rotation?: number;
@@ -398,6 +400,16 @@ export function validateScene(input: unknown): ScenePackage {
     );
     optional(st, 'gradients', gradients, p + '.style');
     optional(st, 'blur', (x, y) => num(x, y, 0, 1000), p + '.style');
+    optional(
+      st,
+      'imageFilters',
+      (v, q) => {
+        const f = obj(v, q);
+        for (const k of ['saturation', 'contrast', 'exposure'])
+          optional(f, k, (x, y) => num(x, y, -1, 1), q);
+      },
+      p + '.style',
+    );
     optional(st, 'backdropBlur', (x, y) => num(x, y, 0, 1000), p + '.style');
     optional(st, 'rotation', (x, y) => num(x, y, -360, 360), p + '.style');
     optional(

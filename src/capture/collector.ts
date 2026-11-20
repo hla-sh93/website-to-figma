@@ -311,14 +311,34 @@ export function collect(selector: string | undefined): {
     if (boxShadows === null)
       issue(id, 'unsupported-effect', 'Shadow syntax is not represented by editable style.');
     else if (boxShadows.length) style.shadow = boxShadows;
-    const blur = c.filter.match(/^blur\(([\d.]+)px\)$/);
-    if (blur) style.blur = px(blur[1]!);
-    else if (c.filter !== 'none')
-      issue(
-        id,
-        'unsupported-effect',
-        'CSS filter other than blur is visible only in the screenshot.',
-      );
+    // Filters Figma can represent: layer blur, and colour filters on image paints.
+    if (c.filter !== 'none') {
+      const amount = (value: string) =>
+        value.endsWith('%') ? parseFloat(value) / 100 : parseFloat(value);
+      const filters: NonNullable<SceneNode['style']['imageFilters']> = {};
+      let supported = true;
+      for (const [, fn, arg] of c.filter.matchAll(/([a-z-]+)\(([^)]*)\)/g)) {
+        if (fn === 'blur') style.blur = px(arg!);
+        else if (fn === 'grayscale')
+          filters.saturation = Math.max(-1, (filters.saturation ?? 0) - Math.min(1, amount(arg!)));
+        else if (fn === 'saturate')
+          filters.saturation = Math.max(
+            -1,
+            Math.min(1, (filters.saturation ?? 0) + amount(arg!) - 1),
+          );
+        else if (fn === 'contrast') filters.contrast = Math.max(-1, Math.min(1, amount(arg!) - 1));
+        else if (fn === 'brightness')
+          filters.exposure = Math.max(-1, Math.min(1, amount(arg!) - 1));
+        else supported = false;
+      }
+      if (Object.keys(filters).length) style.imageFilters = filters;
+      if (!supported)
+        issue(
+          id,
+          'unsupported-effect',
+          'CSS filter other than blur and colour adjustments is visible only in the screenshot.',
+        );
+    }
     const backdrop =
       (c as CSSStyleDeclaration & { backdropFilter?: string }).backdropFilter ?? 'none';
     const backdropBlur = backdrop.match(/^blur\(([\d.]+)px\)$/);
@@ -785,6 +805,56 @@ export function collect(selector: string | undefined): {
     }
     return node;
   };
+  // Boxes whose width comes from their content in CSS (inline boxes, floats,
+  // non-growing items of a flex row) become hugging frames in Figma.
+  const shrinkWrapped = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
+    if (/^inline/.test(c.display) || c.float !== 'none') return true;
+    // Absolute boxes exactly as wide as their content (plus padding) were shrink-wrapped.
+    if ((c.position === 'absolute' || c.position === 'fixed') && n.children.length) {
+      const left = Math.min(...n.children.map((child) => child.bounds.x));
+      const right = Math.max(...n.children.map((child) => child.bounds.x + child.bounds.width));
+      const box =
+        right -
+        left +
+        px(c.paddingLeft) +
+        px(c.paddingRight) +
+        px(c.borderLeftWidth) +
+        px(c.borderRightWidth);
+      if (Math.abs(r.width - box) <= 1) return true;
+    }
+    const parent = el.parentElement ? getComputedStyle(el.parentElement) : undefined;
+    return (
+      !!parent &&
+      /flex/.test(parent.display) &&
+      parent.flexDirection.startsWith('row') &&
+      c.flexGrow === '0'
+    );
+  };
+  // Boxes sized by their container (absolute insets, stretched flex/grid items,
+  // min-height) are taller than their content; hugging would collapse them.
+  const stretchedHeight = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
+    const flow = n.children.filter(
+      (child) => child.position !== 'absolute' && child.source.tag !== '#background',
+    );
+    if (!flow.length) return false;
+    const top = Math.min(...flow.map((child) => child.bounds.y));
+    const bottom = Math.max(...flow.map((child) => child.bounds.y + child.bounds.height));
+    const content =
+      bottom -
+      top +
+      px(c.paddingTop) +
+      px(c.paddingBottom) +
+      px(c.borderTopWidth) +
+      px(c.borderBottomWidth);
+    if (r.height - content <= 1.5) return false;
+    const parent = el.parentElement ? getComputedStyle(el.parentElement).display : '';
+    return (
+      c.position === 'absolute' ||
+      c.position === 'fixed' ||
+      /flex|grid/.test(parent) ||
+      px(c.minHeight) > 0
+    );
+  };
   const buildElement = (el: Element, path: string, depth: number): SceneNode | null => {
     const c = getComputedStyle(el),
       r = el.getBoundingClientRect();
@@ -1013,7 +1083,27 @@ export function collect(selector: string | undefined): {
               : match;
           });
           if (index === 0 && property === 'opacity') value = '1';
-          if (value && !/url\((?!["']?#)/i.test(value)) copy.style.setProperty(property, value);
+          if (!value || /url\((?!["']?#)/i.test(value)) continue;
+          // Presentation attributes import more reliably than long inline style
+          // declarations; computed values already resolve currentColor and classes.
+          if (property === 'color') continue;
+          if (
+            /^(font-|text-anchor|dominant-baseline)/.test(property) &&
+            !/^(text|tspan|textPath)$/i.test(original.tagName)
+          )
+            continue;
+          if (property === 'display') {
+            if (value === 'none') copy.setAttribute('display', 'none');
+            continue;
+          }
+          if (property === 'visibility') {
+            if (value !== 'visible') copy.setAttribute('visibility', value);
+            continue;
+          }
+          if (/^(stroke-width|stroke-dashoffset|stroke-miterlimit|font-size)$/.test(property))
+            value = value.replace(/px$/, '');
+          if (property === 'stroke-dasharray') value = value.replace(/px/g, '');
+          copy.setAttribute(property, value);
         }
       });
       clone
@@ -1284,6 +1374,8 @@ export function collect(selector: string | undefined): {
           id: id + '/text',
           name: n.name + ' text',
           source: { tag: '#text' },
+          // The label flows inside its box even when the box itself is positioned.
+          position: 'flow',
           style: { opacity: 1, ...(textGradients.length ? { gradients: textGradients } : {}) },
           children: [],
           bounds: {
@@ -1339,7 +1431,7 @@ export function collect(selector: string | undefined): {
     const flex = c.display.includes('flex'),
       grid = c.display.includes('grid'),
       horizontal = flex && c.flexDirection.startsWith('row');
-    const align =
+    const crossAlign =
       c.alignItems === 'center'
         ? 'center'
         : c.alignItems.includes('end')
@@ -1347,6 +1439,15 @@ export function collect(selector: string | undefined): {
           : c.alignItems === 'stretch'
             ? 'stretch'
             : 'start';
+    // In a right-to-left column the inline start is the right edge.
+    const align =
+      c.direction === 'rtl' && !horizontal && !grid
+        ? crossAlign === 'start'
+          ? 'end'
+          : crossAlign === 'end'
+            ? 'start'
+            : crossAlign
+        : crossAlign;
     let gap = px(horizontal || grid ? c.columnGap : c.rowGap);
     if (!flex && !grid && n.children.length > 1) {
       const gaps = n.children
@@ -1386,9 +1487,14 @@ export function collect(selector: string | undefined): {
               px(getComputedStyle(el.parentElement).borderRightWidth)),
         ) < 1
           ? 'fill'
-          : 'fixed',
+          : shrinkWrapped(el, c, r, n)
+            ? 'hug'
+            : 'fixed',
       heightSizing:
-        !(el as HTMLElement).style.height && c.display !== 'inline' && n.children.length > 0
+        !(el as HTMLElement).style.height &&
+        c.display !== 'inline' &&
+        n.children.length > 0 &&
+        !stretchedHeight(el, c, r, n)
           ? 'hug'
           : 'fixed',
       ...(grid ? { columns: c.gridTemplateColumns.split(' ').filter(Boolean).length } : {}),

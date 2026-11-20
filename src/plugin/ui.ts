@@ -326,6 +326,7 @@ window.onmessage = async (event: MessageEvent) => {
   if (__DIAGNOSTICS__ && data.type === 'NATIVE_PREVIEW') {
     report('native-preview', {
       png: data.png,
+      screenId: data.screenId,
       nodeId: data.nodeId,
       pageId: data.pageId,
       nodes: data.nodes,
@@ -395,7 +396,7 @@ report('ui-boot', { verification: Boolean(verificationUrl) });
 void ensureConnection();
 if (__DIAGNOSTICS__ && verificationUrl) {
   touched = true;
-  select('size').value = '1440';
+  select('size').value = ownedVerification ? '1440' : 'desktop-mobile';
   select('theme').value = 'light';
   select('language').value = 'original';
   const input = $<HTMLInputElement>('url');

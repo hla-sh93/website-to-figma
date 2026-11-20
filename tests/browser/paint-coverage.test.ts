@@ -22,6 +22,7 @@ body{margin:0;font:16px Arial}
 #rule{border-bottom:3px dashed rgb(10,20,30)}
 #shadows{box-shadow:rgba(0,0,0,0.2) 0 4px 6px -1px, rgb(255,0,0) 0 0 0 2px inset}
 #blurred{filter:blur(4px);background:rgb(0,128,0)}
+#gray{filter:grayscale(1)}
 #glass{backdrop-filter:blur(10px);background:rgba(255,255,255,0.4)}
 #card{position:relative;background:rgb(240,240,240)}
 #card::before{content:"";position:absolute;left:10px;top:5px;width:40px;height:4px;background:rgb(255,0,0)}
@@ -41,6 +42,7 @@ body{margin:0;font:16px Arial}
 <div id="shadows" class="box"></div>
 <div id="blurred" class="box"></div>
 <div id="glass" class="box"></div>
+<div id="gray" class="box"></div>
 <div id="card" class="box"></div>
 <p id="link-line"><a id="link" href="#">Continue</a></p>
 <p><i id="icon"></i></p>
@@ -104,6 +106,7 @@ test('per-side borders, multiple and inset shadows and blur filters are kept', (
   assert.equal(shadows[0]!.spread, -1);
   assert.equal(byKey('blurred').style.blur, 4);
   assert.equal(byKey('glass').style.backdropBlur, 10);
+  assert.equal(byKey('gray').style.imageFilters?.saturation, -1);
 });
 
 test('pseudo-elements become layers or join the text they decorate', () => {

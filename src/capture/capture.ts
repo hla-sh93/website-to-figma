@@ -14,6 +14,7 @@ import { startEgressProxy } from '../service/egress-proxy.js';
 import sharp from 'sharp';
 import { collect } from './collector.js';
 import { nameLayers } from '../core/naming.js';
+import { textLineBoxes } from '../core/text-box.js';
 import { inspectFonts } from './fonts.js';
 import { captureGate, freezePage, pageFingerprint } from './page-state.js';
 import { normalizeImage, MAX_ASSET_BYTES } from './images.js';
@@ -253,7 +254,37 @@ async function capture(
             for (const video of document.querySelectorAll('video')) video.pause();
           });
           // Large photos decide their own height; measure only after they arrive.
-          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          // 'networkidle' already resolved at page load, so it would not wait for the
+          // images the scroll just requested: wait for every image to finish instead.
+          await page
+            .waitForFunction(
+              () => [...document.images].every((image) => image.complete),
+              undefined,
+              {
+                timeout: 30000,
+                polling: 250,
+              },
+            )
+            .catch(async () => {
+              const pending = await page
+                .evaluate(() =>
+                  [...document.images]
+                    .filter((image) => !image.complete)
+                    .map((image) => image.currentSrc || image.src)
+                    .slice(0, 3),
+                )
+                .catch(() => [] as string[]);
+              local.issues.push({
+                code: 'images-still-loading',
+                severity: 'warning',
+                message:
+                  `Some images were still loading after 30 seconds; they may be missing: ${pending.join(', ')}`.slice(
+                    0,
+                    500,
+                  ),
+                screenId: `viewport-${width}`,
+              });
+            });
           await page.evaluate(async () => {
             const timer = ((window as unknown as { __captureTimeout?: typeof setTimeout })
               .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
@@ -593,6 +624,7 @@ async function capture(
             },
             children: [content],
           };
+          textLineBoxes(root);
           nameLayers(root);
           const screenshot = await page.screenshot({
             clip,

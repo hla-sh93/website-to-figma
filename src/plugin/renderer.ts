@@ -138,6 +138,17 @@ export function deriveLayout(node: SceneNode): Layout {
   if (max - min <= 1) layout.gap = Math.max(0, gaps.reduce((a, b) => a + b, 0) / gaps.length);
   return layout;
 }
+const gridBorder = (source: SceneNode): [number, number, number, number] => {
+  const edge = source.style.border;
+  return edge?.sides ?? [edge?.width ?? 0, edge?.width ?? 0, edge?.width ?? 0, edge?.width ?? 0];
+};
+/** Equal CSS track width measured from the grid's content box. */
+function gridTrackWidth(source: SceneNode, layout: Layout): number {
+  const columns = Math.max(1, layout.columns ?? 1);
+  const border = gridBorder(source);
+  const inner = source.bounds.width - layout.padding[1] - layout.padding[3] - border[1] - border[3];
+  return (inner - layout.gap * (columns - 1)) / columns;
+}
 const overlaps = (a: SceneNode, b: SceneNode) =>
   a.bounds.x < b.bounds.x + b.bounds.width - 0.5 &&
   b.bounds.x < a.bounds.x + a.bounds.width - 0.5 &&
@@ -148,6 +159,21 @@ function paintConflict(flow: SceneNode[]): boolean {
     for (let j = i + 1; j < flow.length; j++)
       if (paintRank(flow[i]!) > paintRank(flow[j]!) && overlaps(flow[i]!, flow[j]!)) return true;
   return false;
+}
+function firstTextDirection(node: SceneNode): string | undefined {
+  if (node.text) return node.text.direction;
+  for (const child of node.children) {
+    const found = firstTextDirection(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+const clampUnit = (value: number) => Math.max(-1, Math.min(1, value));
+const STRONG_RTL = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]/;
+export function rtlMark(text: { characters: string; direction: string }): string {
+  if (text.direction !== 'rtl') return '';
+  const first = [...text.characters].find((ch) => /\p{L}/u.test(ch));
+  return first && STRONG_RTL.test(first) ? '' : '\u200f';
 }
 function isSingleLine(source: SceneNode): boolean {
   return (
@@ -347,17 +373,22 @@ export async function renderScene(
       (c) => c.position !== 'absolute' && c.source.tag !== '#background',
     );
     const columns = node.gridColumnCount;
-    const xs = [...new Set(items.map((c) => Math.round(c.bounds.x)))].sort((a, b) => a - b);
+    const layout = layoutOf(source);
+    const track = gridTrackWidth(source, layout);
+    const left = source.bounds.x + layout.padding[3] + gridBorder(source)[3];
+    const columnOf = (c: SceneNode) => Math.round((c.bounds.x - left) / (track + layout.gap));
     const rows: number[] = [];
     for (const y of items.map((c) => c.bounds.y).sort((a, b) => a - b))
       if (!rows.length || y - rows.at(-1)! > 2) rows.push(y);
-    if (xs.length !== columns) return;
     const cells = items.map((c) => ({
       node: node.children.find((n) => n.id === mapping[`${screenId}:${c.id}`]),
       row: rows.findIndex((y) => Math.abs(c.bounds.y - y) <= 2),
-      column: xs.indexOf(Math.round(c.bounds.x)),
+      column: columnOf(c),
     }));
-    if (cells.some((cell) => !cell.node || cell.row < 0 || cell.column < 0)) return;
+    if (
+      cells.some((cell) => !cell.node || cell.row < 0 || cell.column < 0 || cell.column >= columns)
+    )
+      return;
     if (
       cells.every((cell, i) => cell.row === Math.floor(i / columns) && cell.column === i % columns)
     )
@@ -385,6 +416,31 @@ export async function renderScene(
     }
   };
   const huggers = new Set<string>();
+  /** Makes the single-child chain under a shrink-wrapped box hug down to one line of copy. */
+  const hugChain = (source: SceneNode, node: FrameNode, screenId: string): boolean => {
+    const layout = layoutOf(source);
+    if (layout.mode !== 'vertical' && layout.mode !== 'horizontal') return false;
+    const flow = source.children.filter((c) => c.position !== 'absolute');
+    if (flow.length !== 1) return false;
+    const only = flow[0]!;
+    const native = node.children.find((n) => n.id === mapping[`${screenId}:${only.id}`]);
+    if (!native) return false;
+    const border = gridBorder(source);
+    const content =
+      source.bounds.width - layout.padding[1] - layout.padding[3] - border[1] - border[3];
+    if (Math.abs(content - only.bounds.width) > 2) return false;
+    if (native.type === 'TEXT') {
+      if (!isSingleLine(only)) return false;
+      native.layoutSizingHorizontal = 'HUG';
+      native.textAutoResize = 'WIDTH_AND_HEIGHT';
+      return true;
+    }
+    if (native.type !== 'FRAME' || !hugChain(only, native, screenId)) return false;
+    native.layoutSizingHorizontal = 'HUG';
+    huggers.add(only.id);
+    return true;
+  };
+  const imageFilters = new Map<string, ImageFilters>();
   let done = 0,
     lastYield = Date.now();
   const total = allNodes(pkg).length;
@@ -507,6 +563,17 @@ export async function renderScene(
   ): Promise<NativeNode> {
     check();
     await breathe();
+    // CSS colour filters apply to every image painted inside the filtered box.
+    const inherited = parentSource ? imageFilters.get(parentSource.id) : undefined;
+    const own = source.style.imageFilters;
+    const filters = own
+      ? {
+          saturation: clampUnit((inherited?.saturation ?? 0) + (own.saturation ?? 0)),
+          contrast: clampUnit((inherited?.contrast ?? 0) + (own.contrast ?? 0)),
+          exposure: clampUnit((inherited?.exposure ?? 0) + (own.exposure ?? 0)),
+        }
+      : inherited;
+    if (filters) imageFilters.set(source.id, filters);
     let native: NativeNode;
     if (source.kind === 'text') {
       const text = source.text!;
@@ -517,7 +584,11 @@ export async function renderScene(
       node.fontSize = text.fontSize;
       node.lineHeight = { unit: 'PIXELS', value: Math.max(1, text.lineHeight) };
       node.letterSpacing = { unit: 'PIXELS', value: text.letterSpacing };
-      node.characters = text.characters;
+      // Figma picks a paragraph's direction from its first strong letter. A right-to-left
+      // paragraph that starts with Latin text or punctuation needs an invisible RLM so
+      // brackets, numbers and Latin runs are ordered as the browser showed them.
+      const mark = rtlMark(text);
+      node.characters = mark + text.characters;
       node.textDecoration = (text.textDecoration ?? 'none').toUpperCase() as TextDecoration;
       if (text.textCase) node.textCase = text.textCase.toUpperCase() as TextCase;
       const textEffects: Effect[] = (text.shadow ?? [])
@@ -552,7 +623,12 @@ export async function renderScene(
         }
         await node.setTextStyleIdAsync(style.id);
       }
-      for (const run of text.runs ?? []) {
+      for (const sourceRun of text.runs ?? []) {
+        const run = {
+          ...sourceRun,
+          start: sourceRun.start + mark.length,
+          end: sourceRun.end + mark.length,
+        };
         if (run.end <= run.start) continue;
         const request = fontRequest(text, run);
         node.setRangeFontName(run.start, run.end, fonts.resolutions.get(fontKey(request))!.font);
@@ -566,7 +642,12 @@ export async function renderScene(
             run.end,
             run.textDecoration.toUpperCase() as TextDecoration,
           );
-        if (run.lineHeight !== undefined)
+        // A one-line paragraph was measured at its own line height; a taller run
+        // (a floated or enlarged glyph) did not grow that browser line box.
+        if (
+          run.lineHeight !== undefined &&
+          !(isSingleLine(source) && run.lineHeight > text.lineHeight)
+        )
           node.setRangeLineHeight(run.start, run.end, {
             unit: 'PIXELS',
             value: Math.max(1, run.lineHeight),
@@ -589,7 +670,18 @@ export async function renderScene(
         )
       )
         throw new Error('Unsafe SVG asset rejected.');
-      native = api.createNodeFromSvg(svg);
+      // Import at the measured size so Figma scales paths and stroke widths itself;
+      // resizing a 512-unit import afterwards leaves strokes at their original weight.
+      const sized = svg.replace(
+        /^(\s*<svg\b)([^>]*)>/i,
+        (_match, open: string, attributes: string) => {
+          const rest = attributes.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*')/gi, '');
+          const w = Math.max(0.01, source.bounds.width).toFixed(3);
+          const h = Math.max(0.01, source.bounds.height).toFixed(3);
+          return `${open} width="${w}" height="${h}"${rest}>`;
+        },
+      );
+      native = api.createNodeFromSvg(sized);
       parent.appendChild(native);
       native.resize(Math.max(0.01, source.bounds.width), Math.max(0.01, source.bounds.height));
       stats.vectors++;
@@ -615,7 +707,7 @@ export async function renderScene(
         Math.abs(placement.content.width - source.bounds.width) > 0.01 ||
         Math.abs(placement.content.height - source.bounds.height) > 0.01 ||
         (source.style.background?.a ?? 0) > 0;
-      const imagePaint: ImagePaint =
+      const basePaint: ImagePaint =
         spec.fit === 'fill'
           ? {
               type: 'IMAGE',
@@ -631,6 +723,7 @@ export async function renderScene(
               imageHash: image.hash,
               scaleMode: spec.fit === 'contain' ? 'FIT' : 'FILL',
             };
+      const imagePaint: ImagePaint = filters ? { ...basePaint, filters } : basePaint;
       if (custom) {
         const outer = api.createFrame();
         native = outer;
@@ -703,18 +796,18 @@ export async function renderScene(
         node.primaryAxisSizingMode = 'FIXED';
         node.counterAxisSizingMode = 'FIXED';
         if (layout.mode === 'grid') {
-          const columns = Math.min(layout.columns ?? 1, Math.max(1, source.children.length));
+          // Keep every CSS track, including empty ones: a short list in a wide grid
+          // must not stretch across the whole row.
+          const columns = Math.max(1, layout.columns ?? 1);
           node.gridColumnCount = columns;
           node.gridRowCount = Math.max(1, Math.ceil(source.children.length / columns));
           node.gridItemsPositioning = 'ROW_AUTO_FLOW';
           node.gridColumnGap = layout.gap;
           node.gridRowGap = layout.rowGap ?? layout.gap;
+          const track = gridTrackWidth(source, layout);
           for (let i = 0; i < columns; i++) {
-            const item = source.children[i];
-            if (item) {
-              node.gridColumnSizes[i]!.type = 'FLEX';
-              node.gridColumnSizes[i]!.value = Math.max(1, item.bounds.width);
-            }
+            node.gridColumnSizes[i]!.type = 'FLEX';
+            node.gridColumnSizes[i]!.value = Math.max(1, track);
           }
           for (const track of node.gridRowSizes) track.type = 'HUG';
         } else {
@@ -735,6 +828,23 @@ export async function renderScene(
         const flow = source.children.filter((c) => c.position !== 'absolute');
         const first = flow[0],
           last = flow.at(-1);
+        if (layout.mode === 'grid' && flow.length) {
+          // Empty tracks (spacers, zero-height sentinels) still add CSS row gaps
+          // below the visible rows; keep that measured space as bottom padding.
+          const rows: { top: number; bottom: number }[] = [];
+          for (const item of [...flow].sort((a, b) => a.bounds.y - b.bounds.y)) {
+            const row = rows.find((r) => Math.abs(r.top - item.bounds.y) <= 2);
+            if (row) row.bottom = Math.max(row.bottom, item.bounds.y + item.bounds.height);
+            else rows.push({ top: item.bounds.y, bottom: item.bounds.y + item.bounds.height });
+          }
+          const border = gridBorder(source);
+          const content =
+            rows.reduce((sum, r) => sum + r.bottom - r.top, 0) +
+            (layout.rowGap ?? layout.gap) * (rows.length - 1);
+          const extra =
+            source.bounds.height - content - padding[0] - padding[2] - border[0] - border[2];
+          if (extra > 1) padding[2] += extra;
+        }
         if (first && last && layout.mode === 'vertical' && !layout.wrap) {
           // Browser margins before/after the flow are measured, not snapped to a scale.
           const edge = source.style.border;
@@ -745,6 +855,26 @@ export async function renderScene(
             0,
             source.bounds.y + source.bounds.height - last.bounds.y - last.bounds.height - bottom,
           );
+        }
+        if (flow.length && layout.mode !== 'grid') {
+          // Negative margins pull every item past the padding (full-bleed rows);
+          // auto layout cannot overflow its padding, so the padding shrinks instead.
+          // Only edges every item shares move, so siblings never shift.
+          const border = gridBorder(source);
+          const lefts = flow.map((c) => c.bounds.x - source.bounds.x - border[3]);
+          const rights = flow.map(
+            (c) => source.bounds.x + source.bounds.width - border[1] - c.bounds.x - c.bounds.width,
+          );
+          const shared = (values: number[]) =>
+            layout.mode === 'vertical'
+              ? Math.max(...values) - Math.min(...values) <= 0.5
+                ? values[0]!
+                : undefined
+              : undefined;
+          const left = layout.mode === 'horizontal' ? lefts[0] : shared(lefts);
+          const right = layout.mode === 'horizontal' ? rights.at(-1) : shared(rights);
+          if (left !== undefined && left < padding[3] - 0.5) padding[3] = Math.max(0, left);
+          if (right !== undefined && right < padding[1] - 0.5) padding[1] = Math.max(0, right);
         }
         const fields = ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const;
         fields.forEach((field, i) => bindNumber(node, field, padding[i]!));
@@ -812,25 +942,10 @@ export async function renderScene(
         node.layoutSizingVertical = 'HUG';
       // Buttons, links and chips around one line of copy hug it, as a designer
       // would build them; the label then never wraps when Figma glyphs are wider.
-      const flowChildren = source.children.filter((c) => c.position !== 'absolute');
-      const only = flowChildren.length === 1 ? flowChildren[0]! : undefined;
-      const onlyNative = only ? builtChildren.get(only.id) : undefined;
-      if (
-        only &&
-        onlyNative &&
-        (layout.mode === 'vertical' || layout.mode === 'horizontal') &&
-        (huggers.has(only.id) || (onlyNative.type === 'TEXT' && isSingleLine(only)))
-      ) {
-        const edge = source.style.border;
-        const sides = edge?.sides ?? [0, edge?.width ?? 0, 0, edge?.width ?? 0];
-        const content =
-          source.bounds.width - layout.padding[1] - layout.padding[3] - sides[1]! - sides[3]!;
-        if (Math.abs(content - only.bounds.width) <= 2) {
-          onlyNative.layoutSizingHorizontal = 'HUG';
-          if (onlyNative.type === 'TEXT') onlyNative.textAutoResize = 'WIDTH_AND_HEIGHT';
-          node.layoutSizingHorizontal = 'HUG';
-          huggers.add(source.id);
-        }
+      // Only boxes the browser shrink-wrapped hug; block-level buttons keep their width.
+      if (source.layout?.widthSizing === 'hug' && hugChain(source, node, screenId)) {
+        node.layoutSizingHorizontal = 'HUG';
+        huggers.add(source.id);
       }
     }
     native.name = source.name;
@@ -880,6 +995,9 @@ export async function renderScene(
         if (parent.layoutMode !== 'NONE') native.layoutPositioning = 'ABSOLUTE';
         native.x = source.bounds.x - parentSource.bounds.x;
         native.y = source.bounds.y - parentSource.bounds.y;
+        // A hugging right-to-left badge keeps its right edge when Figma's copy is narrower.
+        if (huggers.has(source.id) && firstTextDirection(source) === 'rtl')
+          native.x += source.bounds.width - native.width;
       } else if (mode === 'grid') {
         native.gridChildHorizontalAlign = 'AUTO';
         native.gridChildVerticalAlign = 'MIN';
@@ -921,14 +1039,27 @@ export async function renderScene(
       } else {
         // One measured line must stay one line: Figma's glyph metrics can be a
         // little wider than the browser's, which would wrap a fixed-width label.
-        const singleLine = isSingleLine(source) && native.layoutSizingHorizontal !== 'FILL';
-        const before = native.width;
-        native.textAutoResize =
-          source.text?.sizing === 'inline' || singleLine ? 'WIDTH_AND_HEIGHT' : 'HEIGHT';
         const positioned =
           parent.type !== 'FRAME' ||
           parent.layoutMode === 'NONE' ||
           native.layoutPositioning === 'ABSOLUTE';
+        // Positioned single lines grow from their aligned edge. In auto layout a line
+        // may hug only where that keeps its place: in a row, or in a column aligned to
+        // the same edge as the text. Otherwise hugging would move it to the flow start.
+        const textAlign = source.text?.align;
+        const keepsPlace =
+          positioned ||
+          (parent.type === 'FRAME' &&
+            (parent.layoutMode === 'HORIZONTAL' ||
+              (parent.layoutMode === 'VERTICAL' &&
+                ((parent.counterAxisAlignItems === 'MAX' && textAlign === 'right') ||
+                  (parent.counterAxisAlignItems === 'MIN' && textAlign === 'left') ||
+                  (parent.counterAxisAlignItems === 'CENTER' && textAlign === 'center')))));
+        const singleLine =
+          isSingleLine(source) && native.layoutSizingHorizontal !== 'FILL' && keepsPlace;
+        const before = native.width;
+        native.textAutoResize =
+          source.text?.sizing === 'inline' || singleLine ? 'WIDTH_AND_HEIGHT' : 'HEIGHT';
         if (singleLine && positioned && native.width !== before) {
           // Keep the edge the browser aligned the line to.
           const align =

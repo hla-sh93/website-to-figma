@@ -127,84 +127,92 @@ figma.ui.onmessage = async (message: unknown) => {
     }
     if (__DIAGNOSTICS__ && data.type === 'VERIFY_PREVIEW') {
       if (busy || !current || !result) throw new Error('Import not available for native preview.');
-      const root = await figma.getNodeByIdAsync(result.screenIds[0]!);
-      if (!root || !('exportAsync' in root) || !('absoluteTransform' in root))
-        throw new Error('Imported frame not found.');
-      const bytes = await root.exportAsync({
-        format: 'PNG',
-        constraint: { type: 'WIDTH', value: 640 },
-      });
-      const nodes = [];
-      for (const source of flatten(current.screens[0]!.root)) {
-        const id = result.mapping[current.screens[0]!.id + ':' + source.id];
-        const native = id ? await figma.getNodeByIdAsync(id) : null;
-        if (!native || !('absoluteTransform' in native)) continue;
-        let intrinsicWidth: number | undefined;
-        if (native.type === 'TEXT' && source.text && !source.text.characters.includes('\n')) {
-          const probe = native.clone();
-          try {
-            if (probe.parent && 'layoutMode' in probe.parent && probe.parent.layoutMode !== 'NONE')
-              probe.layoutPositioning = 'ABSOLUTE';
-            probe.textAutoResize = 'WIDTH_AND_HEIGHT';
-            intrinsicWidth = probe.width;
-          } finally {
-            probe.remove();
+      // One preview per imported screen, at source scale, for side-by-side comparison.
+      for (const [index, screen] of current.screens.entries()) {
+        const root = await figma.getNodeByIdAsync(result.screenIds[index]!);
+        if (!root || !('exportAsync' in root) || !('absoluteTransform' in root))
+          throw new Error('Imported frame not found.');
+        const bytes = await root.exportAsync({
+          format: 'JPG',
+          constraint: { type: 'WIDTH', value: Math.min(1440, Math.round(root.width)) },
+        });
+        const nodes = [];
+        for (const source of flatten(screen.root)) {
+          const id = result.mapping[screen.id + ':' + source.id];
+          const native = id ? await figma.getNodeByIdAsync(id) : null;
+          if (!native || !('absoluteTransform' in native)) continue;
+          let intrinsicWidth: number | undefined;
+          if (native.type === 'TEXT' && source.text && !source.text.characters.includes('\n')) {
+            const probe = native.clone();
+            try {
+              if (
+                probe.parent &&
+                'layoutMode' in probe.parent &&
+                probe.parent.layoutMode !== 'NONE'
+              )
+                probe.layoutPositioning = 'ABSOLUTE';
+              probe.textAutoResize = 'WIDTH_AND_HEIGHT';
+              intrinsicWidth = probe.width;
+            } finally {
+              probe.remove();
+            }
           }
+          nodes.push({
+            sourceId: source.id,
+            name: source.name,
+            kind: source.kind,
+            expected: source.bounds,
+            actual: {
+              x:
+                native.absoluteTransform[0][2] -
+                root.absoluteTransform[0][2] +
+                screen.root.bounds.x,
+              y:
+                native.absoluteTransform[1][2] -
+                root.absoluteTransform[1][2] +
+                screen.root.bounds.y,
+              width: native.width,
+              height: native.height,
+            },
+            ...(native.type === 'TEXT'
+              ? {
+                  align: native.textAlignHorizontal,
+                  resizing: native.textAutoResize,
+                  expectedAlign: source.text?.align,
+                  expectedSizing: source.text?.sizing,
+                  intrinsicWidth,
+                  fontSegments: native
+                    .getStyledTextSegments(['fontName', 'fontSize', 'letterSpacing', 'lineHeight'])
+                    .map((segment) => ({
+                      start: segment.start,
+                      end: segment.end,
+                      fontName: segment.fontName,
+                      fontSize: segment.fontSize,
+                      letterSpacing: segment.letterSpacing,
+                      lineHeight: segment.lineHeight,
+                    })),
+                  expectedFont: source.text
+                    ? {
+                        family: source.text.fontFamily,
+                        weight: source.text.fontWeight,
+                        size: source.text.fontSize,
+                        lineHeight: source.text.lineHeight,
+                        letterSpacing: source.text.letterSpacing,
+                      }
+                    : undefined,
+                }
+              : {}),
+          });
         }
-        nodes.push({
-          sourceId: source.id,
-          name: source.name,
-          kind: source.kind,
-          expected: source.bounds,
-          actual: {
-            x:
-              native.absoluteTransform[0][2] -
-              root.absoluteTransform[0][2] +
-              current.screens[0]!.root.bounds.x,
-            y:
-              native.absoluteTransform[1][2] -
-              root.absoluteTransform[1][2] +
-              current.screens[0]!.root.bounds.y,
-            width: native.width,
-            height: native.height,
-          },
-          ...(native.type === 'TEXT'
-            ? {
-                align: native.textAlignHorizontal,
-                resizing: native.textAutoResize,
-                expectedAlign: source.text?.align,
-                expectedSizing: source.text?.sizing,
-                intrinsicWidth,
-                fontSegments: native
-                  .getStyledTextSegments(['fontName', 'fontSize', 'letterSpacing', 'lineHeight'])
-                  .map((segment) => ({
-                    start: segment.start,
-                    end: segment.end,
-                    fontName: segment.fontName,
-                    fontSize: segment.fontSize,
-                    letterSpacing: segment.letterSpacing,
-                    lineHeight: segment.lineHeight,
-                  })),
-                expectedFont: source.text
-                  ? {
-                      family: source.text.fontFamily,
-                      weight: source.text.fontWeight,
-                      size: source.text.fontSize,
-                      lineHeight: source.text.lineHeight,
-                      letterSpacing: source.text.letterSpacing,
-                    }
-                  : undefined,
-              }
-            : {}),
+        post('NATIVE_PREVIEW', {
+          png: figma.base64Encode(bytes),
+          screenId: screen.id,
+          nodes,
+          nodeId: root.id,
+          pageId: figma.currentPage.id,
+          requestId: data.requestId,
         });
       }
-      post('NATIVE_PREVIEW', {
-        png: figma.base64Encode(bytes),
-        nodes,
-        nodeId: root.id,
-        pageId: figma.currentPage.id,
-        requestId: data.requestId,
-      });
       return;
     }
     if (__DIAGNOSTICS__ && data.type === 'VERIFY') {

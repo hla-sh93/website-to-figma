@@ -15,6 +15,8 @@ body{margin:0;font:16px Arial}
 </style></head><body>
 <nav id="row"><a href="#">الرئيسية</a><a href="#">المنتجات</a><a href="#">السلة</a></nav>
 <div id="grid"><div class="cell">1</div><div class="cell">2</div><div class="cell">3</div><div class="cell">4</div><div class="cell">5</div><div class="sentinel"></div></div>
+<section id="col"><p>نص</p><p>نص آخر</p></section>
+<div id="badge-host" style="position:relative;height:40px"><span id="badge" style="position:absolute;right:8px;top:4px;padding:4px 10px;background:rgb(200,0,0)">آخر قطعة</span></div>
 </body></html>`;
 
 const scene = await captureHtml(html, { widths: [390] });
@@ -48,4 +50,11 @@ test('empty grid sentinels do not turn a grid into fixed positions', () => {
     cells,
     [...cells].sort((a, b) => a[0]! - b[0]! || a[1]! - b[1]!),
   );
+});
+
+test('right-to-left columns align to the right and free absolute badges hug', () => {
+  assert.equal(byKey('col').layout?.align, 'end');
+  assert.equal(byKey('badge').layout?.widthSizing, 'hug');
+  // The label flows inside the positioned badge.
+  assert.equal(byKey('badge').children[0]?.position, 'flow');
 });

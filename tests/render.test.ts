@@ -387,7 +387,7 @@ test('a chip around one line of copy hugs its label instead of filling', async (
             position: 'flow',
             bounds: { x: 0, y: 0, width: 77, height: 40 },
             style: { opacity: 1, border: { color: red, width: 1 } },
-            layout: flow('vertical', [6, 16, 6, 16]),
+            layout: { ...flow('vertical', [6, 16, 6, 16]), widthSizing: 'hug' as const },
             children: [
               node('label', {
                 kind: 'text',
@@ -439,4 +439,155 @@ test('a stacked sticky header that overlaps nothing keeps the page in auto layou
     page.children.map((c: { id: string }) => c.id),
     [byId('header').id, byId('main').id],
   );
+});
+
+test('SVG icons are imported at their measured size so strokes scale with them', async () => {
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" viewBox="0 0 512 512"><path d="M48 80h64" stroke="red" stroke-width="32"/></svg>';
+  const { byId } = await render(
+    scene(
+      [
+        node('cart', {
+          kind: 'svg',
+          assetId: 'cart',
+          bounds: { x: 0, y: 0, width: 18, height: 18 },
+        }),
+      ],
+      [
+        {
+          id: 'cart',
+          kind: 'svg',
+          mimeType: 'image/svg+xml',
+          data: Buffer.from(svg).toString('base64'),
+          width: 512,
+          height: 512,
+        },
+      ],
+    ),
+  );
+  const imported = byId('cart').svg as string;
+  assert.match(imported, /^<svg width="18\.000" height="18\.000" xmlns=/);
+  assert.doesNotMatch(imported, /width="512"/);
+});
+
+test('right-to-left copy that starts with Latin text keeps the browser order', async () => {
+  const { byId } = await render(
+    scene([
+      node('title', {
+        kind: 'text',
+        text: text('(TEST) Nike Air Jordan 5', {
+          direction: 'rtl',
+          align: 'right',
+          runs: [{ start: 1, end: 5, color: red }],
+        }),
+      }),
+      node('arabic', { kind: 'text', text: text('نايكي ترافيس', { direction: 'rtl' }) }),
+    ]),
+  );
+  const title = byId('title');
+  assert.equal(title.characters, '\u200f(TEST) Nike Air Jordan 5');
+  assert.equal(title.ranges.find((r) => r.method === 'setRangeFontName')!.start, 2);
+  assert.equal(byId('arabic').characters, 'نايكي ترافيس');
+});
+
+test('grayscale and saturate filters reach the images inside the filtered box', async () => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const { byId } = await render(
+    scene(
+      [
+        node('logo', {
+          style: { opacity: 1, imageFilters: { saturation: -1 } },
+          children: [
+            node('mark', {
+              kind: 'image',
+              assetId: 'img',
+              image: { fit: 'cover', position: [0.5, 0.5] },
+            }),
+          ],
+        }),
+      ],
+      [
+        {
+          id: 'img',
+          kind: 'image',
+          mimeType: 'image/png',
+          data: png.toString('base64'),
+          width: 200,
+          height: 100,
+        },
+      ],
+    ),
+  );
+  assert.equal(byId('mark').fills[0].filters.saturation, -1);
+});
+
+test('a block-level button keeps its full width instead of hugging its label', async () => {
+  const flow = {
+    gap: 0,
+    align: 'start' as const,
+    justify: 'start' as const,
+    wrap: false,
+    heightSizing: 'hug' as const,
+  };
+  const { byId } = await render(
+    scene([
+      node('card', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 300, height: 60 },
+        layout: { ...flow, mode: 'vertical', padding: [0, 0, 0, 0], widthSizing: 'fixed' },
+        children: [
+          node('button', {
+            position: 'flow',
+            bounds: { x: 0, y: 0, width: 300, height: 44 },
+            style: { opacity: 1, background: red },
+            layout: { ...flow, mode: 'vertical', padding: [10, 12, 10, 12], widthSizing: 'fill' },
+            children: [
+              node('label', {
+                kind: 'text',
+                position: 'flow',
+                bounds: { x: 12, y: 10, width: 276, height: 24 },
+                text: text('عرض المنتج', { direction: 'rtl', align: 'center', lineHeight: 24 }),
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('button').layoutSizingHorizontal, 'FILL');
+  assert.notEqual(byId('label').textAutoResize, 'WIDTH_AND_HEIGHT');
+});
+
+test('a label beside an icon in a row stays on one line', async () => {
+  const { byId } = await render(
+    scene([
+      node('link', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 80, height: 32 },
+        layout: {
+          mode: 'horizontal',
+          gap: 8,
+          padding: [6, 12, 6, 12],
+          align: 'center',
+          justify: 'start',
+          wrap: false,
+          widthSizing: 'hug',
+          heightSizing: 'hug',
+        },
+        children: [
+          node('icon', { position: 'flow', bounds: { x: 12, y: 7, width: 18, height: 18 } }),
+          node('label', {
+            kind: 'text',
+            position: 'flow',
+            bounds: { x: 38, y: 6, width: 30, height: 20 },
+            text: text('السلة', { direction: 'rtl', align: 'right' }),
+          }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('label').textAutoResize, 'WIDTH_AND_HEIGHT');
 });
