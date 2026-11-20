@@ -155,7 +155,7 @@ test('renders gradients, per-side borders, inset shadows, blur and text case nat
   );
   assert.equal(card.strokeBottomWeight, 2);
   assert.equal(card.strokeTopWeight, 0);
-  assert.deepEqual(card.dashPattern, [6, 6]);
+  assert.deepEqual(card.dashPattern, [4, 2]);
   assert.deepEqual(
     card.effects.map((e: Effect) => e.type),
     ['INNER_SHADOW', 'DROP_SHADOW', 'BACKGROUND_BLUR'],

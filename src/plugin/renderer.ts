@@ -718,7 +718,7 @@ export async function renderScene(
       } else native.strokeWeight = border.width;
       const unit = Math.max(1, border.width || Math.max(...(border.sides ?? [1])));
       if (border.dash)
-        native.dashPattern = border.dash === 'dashed' ? [unit * 3, unit * 3] : [unit, unit];
+        native.dashPattern = border.dash === 'dashed' ? [unit * 2, unit] : [unit, unit];
     }
     if ('topLeftRadius' in native && source.style.radius) {
       [
