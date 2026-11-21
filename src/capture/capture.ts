@@ -144,6 +144,23 @@ async function capture(
       const page = await context!.newPage();
       page.setDefaultTimeout(7000);
       page.on('download', (d) => void d.cancel());
+      if (process.env.CAPTURE_TRACE) {
+        page.on(
+          'framenavigated',
+          (f) =>
+            f === page.mainFrame() &&
+            process.stderr.write(`[nav] ${f.url().slice(0, 120)}
+`),
+        );
+        page.on(
+          'request',
+          (r) =>
+            r.isNavigationRequest() &&
+            r.frame() === page.mainFrame() &&
+            process.stderr.write(`[navreq] ${r.url().slice(0, 120)}
+`),
+        );
+      }
       page.on('response', (response) => {
         if (!response.headers()['content-type']?.startsWith('image/')) return;
         if (bodies.has(response.url())) return;
@@ -190,14 +207,34 @@ async function capture(
       const page = await newCapturePage();
       try {
         o.onProgress?.(`capture-${width}`);
+        const started = Date.now();
+        const trace = (label: string) => {
+          if (process.env.CAPTURE_TRACE)
+            process.stderr.write(`[capture ${width}] ${label} +${Date.now() - started}ms\n`);
+        };
         await page.setViewportSize({ width, height });
         if (input.html !== undefined)
           await page.setContent(input.html, { waitUntil: 'domcontentloaded', timeout: 12000 });
         else {
-          const response = await page.goto(input.url!, {
-            waitUntil: 'domcontentloaded',
-            timeout: 20000,
-          });
+          const response = await page
+            .goto(input.url!, { waitUntil: 'domcontentloaded', timeout: 35000 })
+            .catch(async (error: unknown) => {
+              // A slow site may have delivered its content while a late script still
+              // blocks the load event. Continue with what is rendered instead of failing.
+              const rendered = await Promise.race([
+                page.evaluate(() => (document.body?.innerText.trim().length ?? 0) > 0),
+                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 4000)),
+              ]).catch(() => false);
+              if (!rendered) throw error;
+              local.issues.push({
+                code: 'slow-load',
+                severity: 'warning',
+                message:
+                  'The page was still loading after 35 seconds; the capture continued with the content already shown.',
+                screenId: `viewport-${width}`,
+              });
+              return null;
+            });
           if (response && response.status() >= 400)
             throw new Error(
               `[HTTP_STATUS] Website returned HTTP ${response.status()}; the requested page was not captured.`,
@@ -233,8 +270,11 @@ async function capture(
           .catch(() => {
             throw new Error('The website did not reveal visible content before capture.');
           });
+        trace('loaded');
         const assetCount = local.assets.length,
           issueCount = local.issues.length;
+        let consentHandled = false,
+          imagesAwaited = false;
         for (let attempt = 0; attempt < 3; attempt++) {
           if (await page.evaluate(captureGate))
             throw new Error(
@@ -256,35 +296,45 @@ async function capture(
           // Large photos decide their own height; measure only after they arrive.
           // 'networkidle' already resolved at page load, so it would not wait for the
           // images the scroll just requested: wait for every image to finish instead.
-          await page
-            .waitForFunction(
-              () => [...document.images].every((image) => image.complete),
-              undefined,
-              {
-                timeout: 30000,
-                polling: 250,
-              },
-            )
-            .catch(async () => {
-              const pending = await page
-                .evaluate(() =>
-                  [...document.images]
-                    .filter((image) => !image.complete)
-                    .map((image) => image.currentSrc || image.src)
-                    .slice(0, 3),
-                )
-                .catch(() => [] as string[]);
-              local.issues.push({
-                code: 'images-still-loading',
-                severity: 'warning',
-                message:
-                  `Some images were still loading after 30 seconds; they may be missing: ${pending.join(', ')}`.slice(
-                    0,
-                    500,
+          // Only images that will finish count: rendered ones, and lazy ones the scroll
+          // reached. Hidden carousel slides never load, and waiting again on a retry
+          // only repeats the same wait.
+          if (!imagesAwaited)
+            await page
+              .waitForFunction(
+                () =>
+                  [...document.images].every(
+                    (image) =>
+                      image.complete ||
+                      !image.getClientRects().length ||
+                      (image.loading === 'lazy' && !image.currentSrc),
                   ),
-                screenId: `viewport-${width}`,
+                undefined,
+                {
+                  timeout: 30000,
+                  polling: 250,
+                },
+              )
+              .catch(async () => {
+                const pending = await page
+                  .evaluate(() =>
+                    [...document.images]
+                      .filter((image) => !image.complete && image.getClientRects().length)
+                      .map((image) => image.currentSrc || image.src)
+                      .slice(0, 3),
+                  )
+                  .catch(() => [] as string[]);
+                local.issues.push({
+                  code: 'images-still-loading',
+                  severity: 'warning',
+                  message:
+                    `Some images were still loading after 30 seconds; they may be missing: ${pending.join(', ')}`.slice(
+                      0,
+                      500,
+                    ),
+                  screenId: `viewport-${width}`,
+                });
               });
-            });
           await page.evaluate(async () => {
             const timer = ((window as unknown as { __captureTimeout?: typeof setTimeout })
               .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
@@ -293,10 +343,14 @@ async function capture(
               new Promise<void>((resolve) => timer(resolve, 6000)),
             ]);
           });
+          imagesAwaited = true;
+          trace('images ready');
           // Dismiss only recognized cookie-rejection controls, never general page actions.
+          let dismissed = false;
           for (const selector of ['#sp-cc-rejectall-link', '#onetrust-reject-all-handler']) {
             const reject = page.locator(selector);
-            if (await reject.isVisible().catch(() => false))
+            if (await reject.isVisible().catch(() => false)) {
+              dismissed = true;
               await reject.click({ timeout: 4000 }).catch(() => {
                 local.issues.push({
                   code: 'consent-dismissal-failed',
@@ -304,12 +358,36 @@ async function capture(
                   message: 'The cookie banner could not be dismissed within the bounded wait.',
                 });
               });
+            }
           }
-          const fingerprint = () => page.evaluate(pageFingerprint);
+          if (dismissed && !consentHandled) {
+            // Many consent managers reload the page after a choice. Measuring across
+            // that reload would wait on a document that no longer exists, so let it
+            // finish and prepare the page again (scroll, images) before measuring.
+            consentHandled = true;
+            await page.waitForTimeout(1200);
+            await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+            trace('consent dismissed, page prepared again');
+            attempt--;
+            imagesAwaited = false;
+            continue;
+          }
+          // A page that stops answering must fail clearly, not hang until the capture limit.
+          const fingerprint = () =>
+            Promise.race([
+              page.evaluate(pageFingerprint),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () => reject(new Error('The page stopped responding while it was measured.')),
+                  15000,
+                ),
+              ),
+            ]);
           const settle = async (rounds: number) => {
             let previous = '',
               unchanged = 0;
             for (let i = 0; i < rounds; i++) {
+              trace(`settle round ${i}`);
               const geometry = await fingerprint();
               if (geometry === previous) {
                 if (++unchanged >= 5) return true;
@@ -321,9 +399,12 @@ async function capture(
           };
           // Let late hydration finish first; only a page that keeps moving is frozen
           // (carousels, canvas loops, tickers) so it can be captured at one frame.
+          trace('before settle');
           let stable = await settle(24);
           if (!stable) {
+            trace('freezing');
             await page.evaluate(freezePage);
+            trace('frozen');
             if (attempt === 0)
               local.issues.push({
                 code: 'motion-frozen',
@@ -341,6 +422,7 @@ async function capture(
                 'The page kept changing after motion was frozen; layers reflect one captured moment.',
               screenId: `viewport-${width}`,
             });
+          trace('settled');
           const collectedState = await fingerprint();
           await page.evaluate('globalThis.__name = (value) => value');
           local.title = await page.title();
@@ -350,6 +432,7 @@ async function capture(
               `JSON.stringify((${collect.toString()})(${JSON.stringify(o.selector ?? null)}))`,
             ),
           ) as ReturnType<typeof collect>;
+          trace('collector returned');
           const screenId = `viewport-${width}`;
           const nodes = new Map<string, SceneNode>();
           const visit = (n: SceneNode) => {
@@ -358,6 +441,7 @@ async function capture(
           };
           visit(data.root);
           await inspectFonts(page, data.textSources, nodes, data.issues);
+          trace('fonts inspected');
           for (const issue of data.issues) local.issues.push({ ...issue, screenId });
           // Image work runs first; screenshot-based media frames run after the change check,
           // because full-page screenshots resize the viewport and can disturb the page.
@@ -557,6 +641,7 @@ async function capture(
               Promise.allSettled([...pendingBodies]),
               new Promise((resolve) => setTimeout(resolve, 10000)),
             ]);
+          trace('collected');
           for (const s of data.sources) if (!s.mediaFrame) await processSource(s);
           const settledState = await fingerprint();
           if (settledState !== collectedState && attempt < 2) {
@@ -626,6 +711,7 @@ async function capture(
           };
           textLineBoxes(root);
           nameLayers(root);
+          trace('sources processed');
           const screenshot = await page.screenshot({
             clip,
             fullPage: true,
@@ -641,6 +727,7 @@ async function capture(
                 'The page changed while the reference screenshot was taken; it may differ from the layers.',
               screenId,
             });
+          trace('screenshot done');
           local.screens.push({
             id: screenId,
             viewport: { width, height, dpr: 1 },
@@ -669,7 +756,20 @@ async function capture(
       return local;
     };
     // Each width loads in its own page at the same time.
-    const captured = await Promise.all(widths.map(captureWidth));
+    const attempts = await Promise.allSettled(widths.map(captureWidth));
+    const captured: Awaited<ReturnType<typeof captureWidth>>[] = [];
+    for (const [index, attempt] of attempts.entries()) {
+      if (attempt.status === 'fulfilled') captured.push(attempt.value);
+      // Some sites stall one of several simultaneous loads. A width whose navigation
+      // timed out is loaded again on its own, after the others have finished.
+      else if (
+        widths.length > 1 &&
+        !stop &&
+        /page.goto: Timeout/.test(String((attempt.reason as Error | undefined)?.message))
+      )
+        captured.push(await captureWidth(widths[index]!));
+      else throw attempt.reason;
+    }
     result.capture.title = captured.find((c) => c.title)?.title ?? '';
     const assetIds = new Set<string>();
     for (const part of captured) {
@@ -723,7 +823,7 @@ async function capture(
         timer = setTimeout(() => {
           void close();
           reject(new Error('Capture timeout'));
-        }, 85000);
+        }, 120000);
         o.signal?.addEventListener('abort', () => reject(new Error('Capture aborted')), {
           once: true,
         });
