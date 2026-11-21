@@ -157,7 +157,9 @@ export function deriveLayout(node: SceneNode): Layout {
       // Shared margins: the tightest box around the children, then the same test.
       const from = Math.min(...children.map(crossStart)),
         to = Math.max(...children.map(crossEnd));
-      align = fit(from, to);
+      // Children that start before the box (a carousel track moved by a transform)
+      // cannot be reached by padding: they keep their measured positions.
+      align = from < boxStart - 1.5 ? undefined : fit(from, to);
       if (align) {
         layout.padding[before] = Math.max(0, from - boxStart);
         layout.padding[after] = Math.max(0, boxEnd - to);
@@ -165,12 +167,15 @@ export function deriveLayout(node: SceneNode): Layout {
     }
     if (!align) return { ...layout, mode: 'none' };
     layout.align = align;
+    if (vertical && Math.min(...children.map((c) => c.bounds.y)) < node.bounds.y + border[0] - 1.5)
+      return { ...layout, mode: 'none' };
     if (!vertical) {
       // Main axis of a row: where the first and last items sit decides the justification.
       const rowStart = node.bounds.x + border[3],
         rowEnd = node.bounds.x + node.bounds.width - border[1];
       const first = Math.min(...children.map((c) => c.bounds.x)),
         last = Math.max(...children.map((c) => c.bounds.x + c.bounds.width));
+      if (first < rowStart - 1.5) return { ...layout, mode: 'none' };
       const lead = first - rowStart - layout.padding[3],
         trail = rowEnd - layout.padding[1] - last;
       const matches = {
@@ -505,6 +510,7 @@ export async function renderScene(
     }
   };
   const huggers = new Set<string>();
+  const oneLineTexts: { node: TextNode; lineHeight: number }[] = [];
   /** Makes the single-child chain under a shrink-wrapped box hug down to one line of copy. */
   const hugChain = (source: SceneNode, node: FrameNode, screenId: string): boolean => {
     const layout = layoutOf(source);
@@ -519,7 +525,8 @@ export async function renderScene(
       source.bounds.width - layout.padding[1] - layout.padding[3] - border[1] - border[3];
     if (Math.abs(content - only.bounds.width) > 2) return false;
     if (native.type === 'TEXT') {
-      if (!isSingleLine(only)) return false;
+      // Only copy that fills its box naturally: a centred line in a wider block must not shrink it.
+      if (!isSingleLine(only) || only.text?.sizing !== 'inline') return false;
       native.layoutSizingHorizontal = 'HUG';
       native.textAutoResize = 'WIDTH_AND_HEIGHT';
       return true;
@@ -554,6 +561,13 @@ export async function renderScene(
       native.name = `${pkg.capture.title || 'Page'} / ${screen.viewport.width >= 1000 ? 'Desktop' : screen.viewport.width >= 600 ? 'Tablet' : 'Mobile'} / ${screen.viewport.width}`;
       native.x = offset;
       native.y = 0;
+      // Last resort for lines the browser showed on one row that wrapped at their
+      // measured width (wider glyphs, a substituted font): one row matters more than
+      // the exact box, so those lines size themselves. Sizes are read first, in one
+      // layout pass, then changed.
+      const wrapped = oneLineTexts.filter((t) => t.node.height > t.lineHeight * 1.5);
+      for (const t of wrapped) t.node.textAutoResize = 'WIDTH_AND_HEIGHT';
+      oneLineTexts.length = 0;
       screens.push(native.id);
       offset += screen.root.bounds.width + 80;
     }
@@ -735,7 +749,7 @@ export async function renderScene(
         // (a floated or enlarged glyph) did not grow that browser line box.
         if (
           run.lineHeight !== undefined &&
-          !(isSingleLine(source) && run.lineHeight > text.lineHeight)
+          !(isSingleLine(source) && run.lineHeight > source.bounds.height + 0.5)
         )
           node.setRangeLineHeight(run.start, run.end, {
             unit: 'PIXELS',
@@ -1185,6 +1199,14 @@ export async function renderScene(
           (source.text?.sizing === 'inline' && isSingleLine(source)) || singleLine
             ? 'WIDTH_AND_HEIGHT'
             : 'HEIGHT';
+        // Checked once the whole screen exists: reading a size while the tree is still
+        // being built forces a layout pass on a half-finished auto-layout tree.
+        if (
+          native.textAutoResize === 'HEIGHT' &&
+          isSingleLine(source) &&
+          native.layoutSizingHorizontal !== 'FILL'
+        )
+          oneLineTexts.push({ node: native, lineHeight: source.text!.lineHeight });
         if (singleLine && positioned && native.width !== before) {
           // Keep the edge the browser aligned the line to.
           const align =

@@ -979,8 +979,31 @@ export function collect(selector: string | undefined): {
       );
       return n;
     }
-    if (['CANVAS', 'IFRAME'].includes(el.tagName))
+    // Embedded players, maps and canvas charts cannot be rebuilt as layers; like video,
+    // they are kept as an image of what they show, so the design has no hole there.
+    if (['CANVAS', 'IFRAME'].includes(el.tagName)) {
+      if (r.width >= 40 && r.height >= 40) {
+        n.kind = 'image';
+        n.name = el.tagName === 'CANVAS' ? 'Canvas' : 'Embed';
+        n.image = { fit: 'fill', position: [0.5, 0.5] };
+        sources.push({
+          nodeId: id,
+          kind: 'image',
+          url: 'frame:' + el.tagName.toLowerCase(),
+          width: r.width,
+          height: r.height,
+          mediaFrame: true,
+        });
+        flattened.add(id);
+        issue(
+          id,
+          'media-static-frame',
+          'Embedded content retained as an image of what it showed; it is not interactive.',
+        );
+        return n;
+      }
       issue(id, 'unsupported-media', 'Dynamic media is present only in the source screenshot.');
+    }
     const glyph = iconGlyph(el, c, r);
     if (glyph) {
       n.kind = 'image';

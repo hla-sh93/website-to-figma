@@ -393,7 +393,7 @@ test('a chip around one line of copy hugs its label instead of filling', async (
                 kind: 'text',
                 position: 'flow',
                 bounds: { x: 17, y: 7, width: 43, height: 20 },
-                text: text('إكسسوار', { direction: 'rtl', align: 'right' }),
+                text: text('إكسسوار', { direction: 'rtl', align: 'right', sizing: 'inline' }),
               }),
             ],
           }),

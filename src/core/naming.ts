@@ -171,7 +171,15 @@ function derive(
   if (node.kind === 'svg') return 'Icon';
   if (tag === '#background') return 'Background';
   if (node.kind === 'image')
-    return node.name === 'Icon' ? 'Icon' : tag === 'video' ? 'Video' : 'Image';
+    return node.name === 'Icon'
+      ? 'Icon'
+      : tag === 'video'
+        ? 'Video'
+        : tag === 'iframe'
+          ? 'Embed'
+          : tag === 'canvas'
+            ? 'Canvas'
+            : 'Image';
   const label = textOf(node);
   const first = textOf(node, 1);
   const role = node.source.role ? ROLES[node.source.role] : undefined;
