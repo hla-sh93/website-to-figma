@@ -22,6 +22,8 @@ export type Layout = {
   justify: 'start' | 'center' | 'end' | 'space-between';
   wrap: boolean;
   columns?: number;
+  /** Measured grid column widths in pixels, one per column. */
+  tracks?: number[];
   widthSizing: 'fixed' | 'fill' | 'hug';
   heightSizing: 'fixed' | 'fill' | 'hug';
   minWidth?: number;
@@ -438,6 +440,15 @@ export function validateScene(input: unknown): ScenePackage {
         en(l.justify, q + '.justify', ['start', 'center', 'end', 'space-between']);
         bool(l.wrap, q + '.wrap');
         optional(l, 'columns', (x, y) => integer(x, y, 1), q);
+        optional(
+          l,
+          'tracks',
+          (x, y) => {
+            if (!Array.isArray(x) || x.length > 64) fail(y + ' must be a short array');
+            (x as unknown[]).forEach((value, i) => num(value, y + '[' + i + ']', 0));
+          },
+          q,
+        );
         for (const k of ['widthSizing', 'heightSizing'])
           en(l[k], q + '.' + k, ['fixed', 'fill', 'hug']);
         for (const k of ['minWidth', 'maxWidth']) optional(l, k, (x, y) => num(x, y, 0), q);

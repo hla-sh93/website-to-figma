@@ -60,10 +60,19 @@ export function gradientPaint(g: Gradient, width: number, height: number): Gradi
           ? 'GRADIENT_RADIAL'
           : 'GRADIENT_ANGULAR',
     gradientTransform: gradientTransform(g, width, height),
-    gradientStops: g.stops.map((stop) => ({
-      position: Math.min(1, Math.max(0, stop.position)),
-      color: { ...stop.color },
-    })),
+    gradientStops: g.stops.map((stop, index) => {
+      let color = stop.color;
+      if (color.a === 0) {
+        // A transparent stop has no colour of its own: CSS fades its neighbour out,
+        // while interpolating towards transparent black shows grey in between.
+        const near = (
+          g.stops.slice(index + 1).find((s) => s.color.a > 0) ??
+          [...g.stops.slice(0, index)].reverse().find((s) => s.color.a > 0)
+        )?.color;
+        if (near) color = { ...near, a: 0 };
+      }
+      return { position: Math.min(1, Math.max(0, stop.position)), color: { ...color } };
+    }),
   };
 }
 

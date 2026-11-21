@@ -520,12 +520,32 @@ async function capture(
               return;
             }
             // SVG response images are sanitized using the browser DOM before packaging.
+            // The artwork fills its box without letterboxing or stretching.
+            const sameAspect = (svg: string, box: { width: number; height: number }) => {
+              const view = /viewBox="s*[-d.]+[s,]+[-d.]+[s,]+([d.]+)[s,]+([d.]+)/.exec(svg);
+              if (!view || !box.height) return false;
+              const ratio = Number(view[1]) / Number(view[2]);
+              return Math.abs(ratio - box.width / box.height) <= 0.02 * ratio;
+            };
+            let vectorImage = false;
             if (asset.mime === 'image/svg+xml') {
               const sanitized = await page.evaluate((svg) => {
                 const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
                 doc
-                  .querySelectorAll('script,foreignObject,style,animate,set,animateTransform')
+                  .querySelectorAll('script,foreignObject,animate,set,animateTransform')
                   .forEach((e) => e.remove());
+                // Style sheets carry the image's colours; only remote references are dropped.
+                for (const style of doc.querySelectorAll('style'))
+                  style.textContent = (style.textContent ?? '')
+                    .replace(/@import[^;]*;?/gi, '')
+                    .replace(/url\((?!["']?#)[^)]*\)/gi, 'none');
+                const rootSvg = doc.documentElement;
+                // A viewBox lets the image scale to the size it is shown at.
+                if (!rootSvg.getAttribute('viewBox')) {
+                  const w = parseFloat(rootSvg.getAttribute('width') ?? ''),
+                    h = parseFloat(rootSvg.getAttribute('height') ?? '');
+                  if (w > 0 && h > 0) rootSvg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+                }
                 for (const e of doc.querySelectorAll('*'))
                   for (const a of [...e.attributes])
                     if (
@@ -537,13 +557,42 @@ async function capture(
                 return new XMLSerializer().serializeToString(doc.documentElement);
               }, asset.body.toString());
               asset = { mime: asset.mime, body: Buffer.from(sanitized) };
+              // Simple SVG files shown through <img> (icons, logos) stay editable vectors.
+              const box = n.image?.contentBox;
+              vectorImage =
+                s.kind === 'image' &&
+                !s.background &&
+                // Icons and logos only: larger artwork behaves like a photo (crop, fit).
+                Math.max(n.bounds.width, n.bounds.height) <= 240 &&
+                (n.image?.fit === 'fill' || n.image?.fit === 'contain') &&
+                sanitized.length <= 60000 &&
+                sameAspect(sanitized, n.bounds) &&
+                /\bviewBox=/.test(sanitized) &&
+                !/<(?:style|filter|mask|image|pattern|use|text)\b/i.test(sanitized) &&
+                (!box ||
+                  (Math.abs(box.width - n.bounds.width) < 1 &&
+                    Math.abs(box.height - n.bounds.height) < 1));
+              if (vectorImage) {
+                s.kind = 'svg';
+                n.kind = 'svg';
+                delete n.image;
+                s.width = n.bounds.width;
+                s.height = n.bounds.height;
+              }
             }
             if (s.kind === 'image' && asset.mime === 'image/svg+xml') {
               try {
                 const w = Math.max(1, Math.min(3840, Math.round(s.width || n.bounds.width))),
                   h = Math.max(1, Math.min(16000, Math.round(s.height || n.bounds.height)));
-                const png = await sharp(asset.body, { limitInputPixels: 16000000 })
-                  .resize(w, h, { fit: 'inside', withoutEnlargement: true })
+                // Vector artwork is drawn at three times its shown size so it stays sharp.
+                const shown = Math.max(n.bounds.width, n.bounds.height, 1);
+                const natural = Math.max(w, h);
+                const scale = Math.max(1, Math.min(4, (shown * 3) / natural, 2048 / natural));
+                const png = await sharp(asset.body, {
+                  limitInputPixels: 16000000,
+                  density: Math.round(72 * scale),
+                })
+                  .resize(Math.round(w * scale), Math.round(h * scale), { fit: 'inside' })
                   .png()
                   .toBuffer({ resolveWithObject: true });
                 if (png.data.length > MAX_ASSET_BYTES) throw new Error('Image budget');

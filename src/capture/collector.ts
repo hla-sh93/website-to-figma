@@ -846,6 +846,8 @@ export function collect(selector: string | undefined): {
       px(c.paddingBottom) +
       px(c.borderTopWidth) +
       px(c.borderBottomWidth);
+    // Content taller than its box overflows it (a logo in a shorter slide); hugging would grow the box.
+    if (content - r.height > 1.5) return true;
     if (r.height - content <= 1.5) return false;
     const parent = el.parentElement ? getComputedStyle(el.parentElement).display : '';
     return (
@@ -1106,8 +1108,77 @@ export function collect(selector: string | undefined): {
           copy.setAttribute(property, value);
         }
       });
+      // Sprite icons: <use href="#id"> points at a symbol elsewhere in the page, which an
+      // exported SVG cannot reach. The referenced shapes are copied into the icon.
+      const uses = [...el.querySelectorAll('use')];
+      [...clone.querySelectorAll('use')].forEach((use, index) => {
+        const original = uses[index];
+        const ref = (use.getAttribute('href') ?? use.getAttribute('xlink:href') ?? '').trim();
+        const target = ref.startsWith('#') ? document.getElementById(ref.slice(1)) : null;
+        if (!original || !target || target.contains(el) || el.contains(target)) return;
+        const NS = 'http://www.w3.org/2000/svg';
+        let symbol = /^symbol$/i.test(target.tagName);
+        // The usual icon: an unsized <use> in an <svg> without a viewBox. The symbol's
+        // viewBox moves to the icon itself, which every SVG importer understands
+        // (nested <svg> viewports are less widely supported).
+        const direct =
+          symbol &&
+          !clone.getAttribute('viewBox') &&
+          !!target.getAttribute('viewBox') &&
+          !['x', 'y', 'width', 'height'].some((name) => use.getAttribute(name));
+        if (direct) {
+          clone.setAttribute('viewBox', target.getAttribute('viewBox')!);
+          const ratio = target.getAttribute('preserveAspectRatio');
+          if (ratio) clone.setAttribute('preserveAspectRatio', ratio);
+        }
+        const holder = document.createElementNS(NS, symbol && !direct ? 'svg' : 'g');
+        if (direct) {
+          for (const child of target.childNodes) holder.appendChild(child.cloneNode(true));
+          symbol = false;
+        }
+        const paint = getComputedStyle(original);
+        if (symbol) {
+          for (const name of ['viewBox', 'preserveAspectRatio']) {
+            const value = target.getAttribute(name);
+            if (value) holder.setAttribute(name, value);
+          }
+          for (const name of ['x', 'y', 'width', 'height']) {
+            const value = use.getAttribute(name);
+            if (value) holder.setAttribute(name, value);
+          }
+          for (const child of target.childNodes) holder.appendChild(child.cloneNode(true));
+        } else {
+          const x = parseFloat(use.getAttribute('x') ?? '0') || 0,
+            y = parseFloat(use.getAttribute('y') ?? '0') || 0;
+          if (x || y) holder.setAttribute('transform', `translate(${x} ${y})`);
+          if (!direct) holder.appendChild(target.cloneNode(true));
+        }
+        // Shapes inherit paint from the <use>; currentColor resolves to its colour.
+        for (const name of [
+          'fill',
+          'stroke',
+          'stroke-width',
+          'opacity',
+          'fill-rule',
+          'clip-rule',
+        ]) {
+          const value = paint.getPropertyValue(name);
+          if (value && !/url\(/.test(value)) holder.setAttribute(name, value.replace(/px$/, ''));
+        }
+        for (const shape of [holder, ...holder.querySelectorAll('*')])
+          for (const attribute of [...shape.attributes])
+            if (/currentcolor/i.test(attribute.value))
+              shape.setAttribute(attribute.name, paint.color);
+        const transform = use.getAttribute('transform');
+        if (transform && symbol) {
+          const group = document.createElementNS(NS, 'g');
+          group.setAttribute('transform', transform);
+          group.appendChild(holder);
+          use.replaceWith(group);
+        } else use.replaceWith(holder);
+      });
       clone
-        .querySelectorAll('script,foreignObject,style,animate,set,animateTransform')
+        .querySelectorAll('script,foreignObject,style,animate,set,animateTransform,use')
         .forEach((e) => e.remove());
       for (const e of [clone, ...clone.querySelectorAll('*')])
         for (const a of [...e.attributes])
@@ -1498,6 +1569,9 @@ export function collect(selector: string | undefined): {
           ? 'hug'
           : 'fixed',
       ...(grid ? { columns: c.gridTemplateColumns.split(' ').filter(Boolean).length } : {}),
+      ...(grid && /^(?:[\d.]+px\s*)+$/.test(c.gridTemplateColumns)
+        ? { tracks: c.gridTemplateColumns.split(' ').filter(Boolean).map(px) }
+        : {}),
       ...(c.minWidth.endsWith('px') ? { minWidth: px(c.minWidth) } : {}),
       ...(c.maxWidth.endsWith('px') ? { maxWidth: px(c.maxWidth) } : {}),
     };

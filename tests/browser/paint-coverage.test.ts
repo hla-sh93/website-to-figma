@@ -47,6 +47,8 @@ body{margin:0;font:16px Arial}
 <p id="link-line"><a id="link" href="#">Continue</a></p>
 <p><i id="icon"></i></p>
 <div id="rotated"></div>
+<svg style="display:none"><symbol id="sprite-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6" fill="none" stroke="currentColor" stroke-width="2"/></symbol></svg>
+<svg id="sprite-icon" style="width:18px;height:18px;color:rgb(255,0,0)"><use href="#sprite-check"></use></svg>
 <p id="upper">Read more</p>
 <p id="shadowed">Shadow</p>
 <p id="gradient-text">Gradient</p>
@@ -158,4 +160,17 @@ test('icon-font glyphs become sharp icon images instead of text in a missing fon
   assert.equal(asset.mimeType, 'image/png');
   assert.ok(asset.width >= icon.bounds.width * 3);
   assert.ok(nodes.every((n) => !/Font Awesome/.test(n.text?.fontFamily ?? '')));
+});
+
+test('sprite icons carry the referenced symbol inside the exported SVG', () => {
+  const icon = byKey('sprite-icon');
+  assert.equal(icon.kind, 'svg');
+  const svg = Buffer.from(
+    scene.assets.find((a) => a.id === icon.assetId)!.data,
+    'base64',
+  ).toString();
+  assert.match(svg, /viewBox="0 0 24 24"/);
+  assert.match(svg, /M4 12l5 5L20 6/);
+  assert.match(svg, /stroke="rgb\(255, 0, 0\)"/);
+  assert.doesNotMatch(svg, /<use/);
 });

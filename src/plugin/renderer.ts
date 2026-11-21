@@ -107,20 +107,88 @@ export function deriveLayout(node: SceneNode): Layout {
   // Auto layout paints in flow order. A different stacking order only matters
   // where flow items overlap (a sticky header over separate content does not).
   if (paintConflict(children)) return { ...layout, mode: 'none' };
-  if (layout.mode === 'vertical' && !layout.wrap) {
-    const start = node.bounds.x + layout.padding[3],
-      end = node.bounds.x + node.bounds.width - layout.padding[1];
-    const narrow = children.filter((c) => c.bounds.width < end - start - 2);
-    if (
-      narrow.length &&
-      children.every((c) => Math.abs(c.bounds.x + c.bounds.width / 2 - (start + end) / 2) <= 1)
+  // A wrapping row whose items were measured on one line stays one line: a fraction
+  // of a pixel (min-width rounding) must not push the last item to a second row.
+  if (
+    layout.wrap &&
+    layout.mode === 'horizontal' &&
+    children.length &&
+    children.every(
+      (c) =>
+        c.bounds.y < children[0]!.bounds.y + children[0]!.bounds.height &&
+        children[0]!.bounds.y < c.bounds.y + c.bounds.height,
     )
-      layout.align = 'center';
-    else if (
-      narrow.length &&
-      children.every((c) => Math.abs(c.bounds.x + c.bounds.width - end) <= 1)
-    )
-      layout.align = 'end';
+  )
+    layout.wrap = false;
+  // CSS reaches the same picture in many ways (auto margins, align-self, baselines,
+  // transforms). Auto layout is kept only where it reproduces the measured positions:
+  // alignment and edge padding are taken from the measurement, and a container whose
+  // children fit no single alignment keeps their measured positions instead.
+  if (
+    (layout.mode === 'vertical' || layout.mode === 'horizontal') &&
+    !layout.wrap &&
+    children.length
+  ) {
+    const vertical = layout.mode === 'vertical';
+    const border = gridBorder(node);
+    const boxStart = vertical ? node.bounds.x + border[3] : node.bounds.y + border[0];
+    const boxEnd = vertical
+      ? node.bounds.x + node.bounds.width - border[1]
+      : node.bounds.y + node.bounds.height - border[2];
+    const before = vertical ? 3 : 0,
+      after = vertical ? 1 : 2;
+    const crossStart = (c: SceneNode) => (vertical ? c.bounds.x : c.bounds.y);
+    const crossEnd = (c: SceneNode) =>
+      vertical ? c.bounds.x + c.bounds.width : c.bounds.y + c.bounds.height;
+    const fit = (from: number, to: number): Layout['align'] | undefined => {
+      const gaps = children.map((c) => [crossStart(c) - from, to - crossEnd(c)] as const);
+      const fills = ([a, b]: readonly [number, number]) => Math.abs(a) <= 1.5 && Math.abs(b) <= 1.5;
+      const matches = {
+        start: gaps.every((g) => fills(g) || Math.abs(g[0]) <= 1.5),
+        center: gaps.every((g) => fills(g) || Math.abs(g[0] - g[1]) <= 2),
+        end: gaps.every((g) => fills(g) || Math.abs(g[1]) <= 1.5),
+      };
+      const wanted = layout.align === 'stretch' ? 'start' : layout.align;
+      if (matches[wanted]) return layout.align;
+      return (['start', 'center', 'end'] as const).find((align) => matches[align]);
+    };
+    let align = fit(boxStart + layout.padding[before], boxEnd - layout.padding[after]);
+    if (!align) {
+      // Shared margins: the tightest box around the children, then the same test.
+      const from = Math.min(...children.map(crossStart)),
+        to = Math.max(...children.map(crossEnd));
+      align = fit(from, to);
+      if (align) {
+        layout.padding[before] = Math.max(0, from - boxStart);
+        layout.padding[after] = Math.max(0, boxEnd - to);
+      }
+    }
+    if (!align) return { ...layout, mode: 'none' };
+    layout.align = align;
+    if (!vertical) {
+      // Main axis of a row: where the first and last items sit decides the justification.
+      const rowStart = node.bounds.x + border[3],
+        rowEnd = node.bounds.x + node.bounds.width - border[1];
+      const first = Math.min(...children.map((c) => c.bounds.x)),
+        last = Math.max(...children.map((c) => c.bounds.x + c.bounds.width));
+      const lead = first - rowStart - layout.padding[3],
+        trail = rowEnd - layout.padding[1] - last;
+      const matches = {
+        start: Math.abs(lead) <= 1.5,
+        end: Math.abs(trail) <= 1.5,
+        center: Math.abs(lead - trail) <= 2,
+        'space-between': children.length > 1 && Math.abs(lead) <= 1.5 && Math.abs(trail) <= 1.5,
+      };
+      if (!matches[layout.justify]) {
+        const justify = (['start', 'center', 'end'] as const).find((j) => matches[j]);
+        if (justify) layout.justify = justify;
+        else {
+          layout.justify = 'start';
+          layout.padding[3] = Math.max(0, first - rowStart);
+          layout.padding[1] = Math.max(0, rowEnd - last);
+        }
+      }
+    }
   }
   if (layout.mode === 'grid' || layout.mode === 'none' || layout.wrap || children.length < 2)
     return layout;
@@ -142,12 +210,13 @@ const gridBorder = (source: SceneNode): [number, number, number, number] => {
   const edge = source.style.border;
   return edge?.sides ?? [edge?.width ?? 0, edge?.width ?? 0, edge?.width ?? 0, edge?.width ?? 0];
 };
-/** Equal CSS track width measured from the grid's content box. */
-function gridTrackWidth(source: SceneNode, layout: Layout): number {
+/** Column widths of a grid: the measured CSS tracks, or equal shares of the content box. */
+function gridTracks(source: SceneNode, layout: Layout): number[] {
   const columns = Math.max(1, layout.columns ?? 1);
+  if (layout.tracks?.length === columns) return layout.tracks;
   const border = gridBorder(source);
   const inner = source.bounds.width - layout.padding[1] - layout.padding[3] - border[1] - border[3];
-  return (inner - layout.gap * (columns - 1)) / columns;
+  return Array.from({ length: columns }, () => (inner - layout.gap * (columns - 1)) / columns);
 }
 const overlaps = (a: SceneNode, b: SceneNode) =>
   a.bounds.x < b.bounds.x + b.bounds.width - 0.5 &&
@@ -374,9 +443,12 @@ export async function renderScene(
     );
     const columns = node.gridColumnCount;
     const layout = layoutOf(source);
-    const track = gridTrackWidth(source, layout);
+    const tracks = gridTracks(source, layout);
     const left = source.bounds.x + layout.padding[3] + gridBorder(source)[3];
-    const columnOf = (c: SceneNode) => Math.round((c.bounds.x - left) / (track + layout.gap));
+    const starts = tracks.map(
+      (_, i) => left + tracks.slice(0, i).reduce((sum, w) => sum + w, 0) + layout.gap * i,
+    );
+    const columnOf = (c: SceneNode) => starts.findIndex((x) => Math.abs(c.bounds.x - x) <= 2);
     const rows: number[] = [];
     for (const y of items.map((c) => c.bounds.y).sort((a, b) => a - b))
       if (!rows.length || y - rows.at(-1)! > 2) rows.push(y);
@@ -804,10 +876,10 @@ export async function renderScene(
           node.gridItemsPositioning = 'ROW_AUTO_FLOW';
           node.gridColumnGap = layout.gap;
           node.gridRowGap = layout.rowGap ?? layout.gap;
-          const track = gridTrackWidth(source, layout);
+          const tracks = gridTracks(source, layout);
           for (let i = 0; i < columns; i++) {
             node.gridColumnSizes[i]!.type = 'FLEX';
-            node.gridColumnSizes[i]!.value = Math.max(1, track);
+            node.gridColumnSizes[i]!.value = Math.max(1, tracks[i]!);
           }
           for (const track of node.gridRowSizes) track.type = 'HUG';
         } else {
@@ -949,7 +1021,9 @@ export async function renderScene(
       }
     }
     native.name = source.name;
-    if (source.layout?.minWidth !== undefined) native.minWidth = source.layout.minWidth || null;
+    // A minimum above the measured width (sub-pixel rounding) would widen the layer.
+    if (source.layout?.minWidth !== undefined)
+      native.minWidth = Math.min(source.layout.minWidth, source.bounds.width) || null;
     if (source.layout?.maxWidth !== undefined)
       native.maxWidth = Math.max(0.01, source.layout.maxWidth);
     native.opacity = source.style.opacity;
@@ -1059,7 +1133,9 @@ export async function renderScene(
           isSingleLine(source) && native.layoutSizingHorizontal !== 'FILL' && keepsPlace;
         const before = native.width;
         native.textAutoResize =
-          source.text?.sizing === 'inline' || singleLine ? 'WIDTH_AND_HEIGHT' : 'HEIGHT';
+          (source.text?.sizing === 'inline' && isSingleLine(source)) || singleLine
+            ? 'WIDTH_AND_HEIGHT'
+            : 'HEIGHT';
         if (singleLine && positioned && native.width !== before) {
           // Keep the edge the browser aligned the line to.
           const align =
