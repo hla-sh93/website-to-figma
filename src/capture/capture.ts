@@ -240,10 +240,12 @@ async function capture(
               `[HTTP_STATUS] Website returned HTTP ${response.status()}; the requested page was not captured.`,
             );
         }
-        await page.addStyleTag({
-          content:
-            '*,*::before,*::after{transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}',
-        });
+        const steadyStyles = () =>
+          page.addStyleTag({
+            content:
+              '*,*::before,*::after{transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}',
+          });
+        await steadyStyles();
         await page
           .waitForFunction(
             () => {
@@ -273,8 +275,51 @@ async function capture(
         trace('loaded');
         const assetCount = local.assets.length,
           issueCount = local.issues.length;
-        let consentHandled = false,
+        const CONSENT = '#sp-cc-rejectall-link, #onetrust-reject-all-handler';
+        // Dismiss only recognized cookie-rejection controls, never general page actions.
+        // Many consent managers reload the page after a choice; measuring across that
+        // reload would wait on a document that no longer exists, so it is awaited here.
+        const dismissConsent = async () => {
+          let dismissed = false;
+          for (const reject of await page.locator(CONSENT).all()) {
+            if (!(await reject.isVisible().catch(() => false))) continue;
+            dismissed = true;
+            await reject.click({ timeout: 4000 }).catch(() => {
+              local.issues.push({
+                code: 'consent-dismissal-failed',
+                severity: 'warning',
+                message: 'The cookie banner could not be dismissed within the bounded wait.',
+                screenId: `viewport-${width}`,
+              });
+            });
+          }
+          if (!dismissed) return false;
+          await page.waitForTimeout(1200);
+          await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+          // A reload may still be parsing: measuring needs the new document's body.
+          await page
+            .waitForFunction(
+              () => !!document.body && document.readyState !== 'loading',
+              undefined,
+              {
+                timeout: 20000,
+              },
+            )
+            .catch(() => {});
+          // A reloaded document lost the capture's style sheet.
+          await steadyStyles().catch(() => {});
+          return true;
+        };
+        // Banners usually show within moments of load; handling one before the page is
+        // scrolled and its images awaited avoids preparing the page twice.
+        await page
+          .locator(CONSENT)
+          .first()
+          .waitFor({ state: 'visible', timeout: 2500 })
+          .catch(() => {});
+        let consentHandled = await dismissConsent(),
           imagesAwaited = false;
+        trace(consentHandled ? 'consent dismissed' : 'no consent banner');
         for (let attempt = 0; attempt < 3; attempt++) {
           if (await page.evaluate(captureGate))
             throw new Error(
@@ -299,42 +344,70 @@ async function capture(
           // Only images that will finish count: rendered ones, and lazy ones the scroll
           // reached. Hidden carousel slides never load, and waiting again on a retry
           // only repeats the same wait.
-          if (!imagesAwaited)
-            await page
-              .waitForFunction(
-                () =>
-                  [...document.images].every(
-                    (image) =>
-                      image.complete ||
-                      !image.getClientRects().length ||
-                      (image.loading === 'lazy' && !image.currentSrc),
-                  ),
-                undefined,
-                {
-                  timeout: 30000,
-                  polling: 250,
-                },
-              )
-              .catch(async () => {
-                const pending = await page
-                  .evaluate(() =>
-                    [...document.images]
-                      .filter((image) => !image.complete && image.getClientRects().length)
-                      .map((image) => image.currentSrc || image.src)
-                      .slice(0, 3),
-                  )
-                  .catch(() => [] as string[]);
-                local.issues.push({
-                  code: 'images-still-loading',
-                  severity: 'warning',
-                  message:
-                    `Some images were still loading after 30 seconds; they may be missing: ${pending.join(', ')}`.slice(
-                      0,
-                      500,
-                    ),
-                  screenId: `viewport-${width}`,
-                });
-              });
+          const lateConsent = consentHandled
+            ? new Promise<never>(() => {})
+            : page
+                .locator(CONSENT)
+                .first()
+                .waitFor({ state: 'visible', timeout: 30000 })
+                .then(
+                  () => 'consent' as const,
+                  () => new Promise<never>(() => {}),
+                );
+          if (!imagesAwaited) {
+            const outcome = await Promise.race([
+              lateConsent,
+              page
+                .waitForFunction(
+                  () => {
+                    const pending = [...document.images].filter(
+                      (image) =>
+                        !image.complete &&
+                        image.getClientRects().length &&
+                        !(image.loading === 'lazy' && !image.currentSrc),
+                    ).length;
+                    // Progress keeps the wait alive; an image that never answers
+                    // (a blocked third party) ends it after eight quiet seconds.
+                    const state = window as unknown as { __pending?: number; __pendingAt?: number };
+                    if (state.__pending !== pending) {
+                      state.__pending = pending;
+                      state.__pendingAt = performance.now();
+                    }
+                    return pending === 0 || performance.now() - (state.__pendingAt ?? 0) > 8000;
+                  },
+                  undefined,
+                  { timeout: 30000, polling: 250 },
+                )
+                .catch(() => {})
+                .then(async () => {
+                  const pending = await page
+                    .evaluate(() =>
+                      [...document.images]
+                        .filter((image) => !image.complete && image.getClientRects().length)
+                        .map((image) => image.currentSrc || image.src)
+                        .slice(0, 3),
+                    )
+                    .catch(() => [] as string[]);
+                  if (pending.length)
+                    local.issues.push({
+                      code: 'images-still-loading',
+                      severity: 'warning',
+                      message:
+                        `Some images did not finish loading and may be missing: ${pending.join(', ')}`.slice(
+                          0,
+                          500,
+                        ),
+                      screenId: `viewport-${width}`,
+                    });
+                }),
+            ]);
+            if (outcome === 'consent' && (await dismissConsent())) {
+              consentHandled = true;
+              trace('consent dismissed while images loaded, page prepared again');
+              attempt--;
+              continue;
+            }
+          }
           await page.evaluate(async () => {
             const timer = ((window as unknown as { __captureTimeout?: typeof setTimeout })
               .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
@@ -345,29 +418,10 @@ async function capture(
           });
           imagesAwaited = true;
           trace('images ready');
-          // Dismiss only recognized cookie-rejection controls, never general page actions.
-          let dismissed = false;
-          for (const selector of ['#sp-cc-rejectall-link', '#onetrust-reject-all-handler']) {
-            const reject = page.locator(selector);
-            if (await reject.isVisible().catch(() => false)) {
-              dismissed = true;
-              await reject.click({ timeout: 4000 }).catch(() => {
-                local.issues.push({
-                  code: 'consent-dismissal-failed',
-                  severity: 'warning',
-                  message: 'The cookie banner could not be dismissed within the bounded wait.',
-                });
-              });
-            }
-          }
-          if (dismissed && !consentHandled) {
-            // Many consent managers reload the page after a choice. Measuring across
-            // that reload would wait on a document that no longer exists, so let it
-            // finish and prepare the page again (scroll, images) before measuring.
+          // A banner that appeared late: dismiss it and prepare the page again once.
+          if (!consentHandled && (await dismissConsent())) {
             consentHandled = true;
-            await page.waitForTimeout(1200);
-            await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
-            trace('consent dismissed, page prepared again');
+            trace('consent dismissed late, page prepared again');
             attempt--;
             imagesAwaited = false;
             continue;
@@ -872,7 +926,7 @@ async function capture(
         timer = setTimeout(() => {
           void close();
           reject(new Error('Capture timeout'));
-        }, 120000);
+        }, 180000);
         o.signal?.addEventListener('abort', () => reject(new Error('Capture aborted')), {
           once: true,
         });

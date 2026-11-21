@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderScene } from '../src/plugin/renderer.js';
-import { gradientTransform, utf8Decode, colorName } from '../src/plugin/paint.js';
+import { gradientPaint, gradientTransform, utf8Decode, colorName } from '../src/plugin/paint.js';
 import type { ScenePackage, SceneNode, TextSpec } from '../src/core/scene.js';
 import { createFakeFigma } from './fake-figma.js';
 
@@ -590,4 +590,137 @@ test('a label beside an icon in a row stays on one line', async () => {
     ]),
   );
   assert.equal(byId('label').textAutoResize, 'WIDTH_AND_HEIGHT');
+});
+
+const flowLayout = (mode: 'vertical' | 'horizontal', extra: Record<string, unknown> = {}) => ({
+  mode,
+  gap: 0,
+  padding: [0, 0, 0, 0] as [number, number, number, number],
+  align: 'start' as const,
+  justify: 'start' as const,
+  wrap: false,
+  widthSizing: 'fixed' as const,
+  heightSizing: 'hug' as const,
+  ...extra,
+});
+
+test('alignment and justification follow the measured positions', async () => {
+  const { byId } = await render(
+    scene([
+      // margin: auto centres the only item of a row that CSS calls justify-start.
+      node('bar', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1440, height: 52 },
+        layout: flowLayout('horizontal'),
+        children: [
+          node('inner', { position: 'flow', bounds: { x: 110, y: 0, width: 1220, height: 52 } }),
+        ],
+      }),
+      // An icon centred beside taller copy in a row that CSS calls align-start.
+      node('row', {
+        position: 'flow',
+        bounds: { x: 0, y: 100, width: 300, height: 40 },
+        layout: flowLayout('horizontal'),
+        children: [
+          node('icon', { position: 'flow', bounds: { x: 0, y: 110, width: 20, height: 20 } }),
+          node('copy', { position: 'flow', bounds: { x: 20, y: 100, width: 100, height: 40 } }),
+        ],
+      }),
+      // Items at unrelated offsets fit no alignment: measured positions are kept.
+      node('mixed', {
+        position: 'flow',
+        bounds: { x: 0, y: 200, width: 300, height: 100 },
+        layout: flowLayout('vertical'),
+        children: [
+          node('left', { position: 'flow', bounds: { x: 0, y: 200, width: 100, height: 40 } }),
+          node('offset', { position: 'flow', bounds: { x: 57, y: 240, width: 100, height: 40 } }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('bar').primaryAxisAlignItems, 'CENTER');
+  assert.equal(byId('row').counterAxisAlignItems, 'CENTER');
+  assert.equal(byId('mixed').layoutMode, 'NONE');
+  assert.equal(byId('offset').x, 57);
+});
+
+test('wrapped inline copy keeps its measured width', async () => {
+  const { byId } = await render(
+    scene([
+      node('item', {
+        kind: 'text',
+        bounds: { x: 0, y: 0, width: 269, height: 44 },
+        text: text('Run campaigns, personalize content, and track it all.', {
+          sizing: 'inline',
+          lineHeight: 22,
+        }),
+      }),
+    ]),
+  );
+  assert.equal(byId('item').textAutoResize, 'HEIGHT');
+  assert.equal(byId('item').width, 269);
+});
+
+test('grid columns use measured tracks and narrow cells keep their width', async () => {
+  const { byId } = await render(
+    scene([
+      node('grid', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1220, height: 200 },
+        layout: {
+          ...flowLayout('vertical'),
+          mode: 'grid',
+          gap: 24,
+          rowGap: 24,
+          columns: 2,
+          tracks: [399, 797],
+        },
+        children: [
+          node('aside', { position: 'flow', bounds: { x: 0, y: 0, width: 399, height: 200 } }),
+          node('link', { position: 'flow', bounds: { x: 423, y: 0, width: 86, height: 48 } }),
+        ],
+      }),
+    ]),
+  );
+  assert.deepEqual(
+    byId('grid').gridColumnSizes.map((t: { value: number }) => t.value),
+    [399, 797],
+  );
+  assert.equal(byId('aside').layoutSizingHorizontal, 'FILL');
+  assert.notEqual(byId('link').layoutSizingHorizontal, 'FILL');
+  assert.equal(byId('link').gridChildHorizontalAlign, 'MIN');
+});
+
+test('boxes taller than their row content keep their height', async () => {
+  const { byId } = await render(
+    scene([
+      node('stage', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1280, height: 900 },
+        layout: flowLayout('horizontal', { align: 'center' }),
+        children: [
+          node('title', { position: 'flow', bounds: { x: 0, y: 340, width: 1280, height: 220 } }),
+        ],
+      }),
+    ]),
+  );
+  assert.notEqual(byId('stage').layoutSizingVertical, 'HUG');
+  assert.equal(byId('stage').height, 900);
+});
+
+test('transparent gradient stops fade the neighbouring colour', () => {
+  const paint = gradientPaint(
+    {
+      kind: 'linear',
+      from: [0, 0.5],
+      to: [1, 0.5],
+      stops: [
+        { position: 0, color: white },
+        { position: 1, color: { r: 0, g: 0, b: 0, a: 0 } },
+      ],
+    },
+    100,
+    100,
+  );
+  assert.deepEqual(paint.gradientStops[1]!.color, { r: 1, g: 1, b: 1, a: 0 });
 });

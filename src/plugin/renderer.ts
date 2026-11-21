@@ -229,6 +229,23 @@ function paintConflict(flow: SceneNode[]): boolean {
       if (paintRank(flow[i]!) > paintRank(flow[j]!) && overlaps(flow[i]!, flow[j]!)) return true;
   return false;
 }
+/** True when hugging reproduces the measured height (no fixed, minimum or stretched height). */
+function hugsHeight(source: SceneNode, layout: Layout): boolean {
+  const flow = source.children.filter((c) => c.position !== 'absolute');
+  if (!flow.length || layout.mode === 'grid' || layout.wrap) return true;
+  // A column's top and bottom padding are measured, so hugging matches unless the
+  // content runs past the box (a child moved by a transform, or clipped overflow).
+  if (layout.mode === 'vertical')
+    return (
+      Math.max(...flow.map((c) => c.bounds.y + c.bounds.height)) -
+        (source.bounds.y + source.bounds.height) <=
+      1.5
+    );
+  const edge = gridBorder(source);
+  const tallest = Math.max(...flow.map((c) => c.bounds.height));
+  const content = tallest + layout.padding[0] + layout.padding[2] + edge[0] + edge[2];
+  return Math.abs(content - source.bounds.height) <= 1.5;
+}
 function firstTextDirection(node: SceneNode): string | undefined {
   if (node.text) return node.text.direction;
   for (const child of node.children) {
@@ -1010,7 +1027,11 @@ export async function renderScene(
       if (keepsFlow && painted.some((child, index) => child.id !== node.children[index]?.id))
         for (const child of painted) node.appendChild(child);
       if (layout.mode === 'grid') placeGridCells(node, source, screenId);
-      if (layout.mode !== 'none' && source.layout?.heightSizing === 'hug')
+      if (
+        layout.mode !== 'none' &&
+        source.layout?.heightSizing === 'hug' &&
+        hugsHeight(source, layout)
+      )
         node.layoutSizingVertical = 'HUG';
       // Buttons, links and chips around one line of copy hug it, as a designer
       // would build them; the label then never wraps when Figma glyphs are wider.
@@ -1073,16 +1094,44 @@ export async function renderScene(
         if (huggers.has(source.id) && firstTextDirection(source) === 'rtl')
           native.x += source.bounds.width - native.width;
       } else if (mode === 'grid') {
-        native.gridChildHorizontalAlign = 'AUTO';
         native.gridChildVerticalAlign = 'MIN';
-        native.layoutSizingHorizontal = 'FILL';
+        // A cell fills its column only when it was measured that wide; a narrower item
+        // (a link under a heading) keeps its width at the edge it was measured on.
+        const parentLayout = layoutOf(parentSource);
+        const tracks = gridTracks(parentSource, parentLayout);
+        const left = parentSource.bounds.x + parentLayout.padding[3] + gridBorder(parentSource)[3];
+        const starts = tracks.map(
+          (_, i) => left + tracks.slice(0, i).reduce((sum, w) => sum + w, 0) + parentLayout.gap * i,
+        );
+        const column = starts.findIndex(
+          (x, i) => source.bounds.x >= x - 2 && source.bounds.x < x + tracks[i]! + 2,
+        );
+        const track = column < 0 ? undefined : tracks[column]!;
+        if (track === undefined || Math.abs(source.bounds.width - track) <= 2) {
+          native.gridChildHorizontalAlign = 'AUTO';
+          native.layoutSizingHorizontal = 'FILL';
+        } else {
+          const lead = source.bounds.x - starts[column]!,
+            trail = starts[column]! + track - source.bounds.x - source.bounds.width;
+          native.gridChildHorizontalAlign =
+            Math.abs(lead - trail) <= 2 ? 'CENTER' : lead > trail ? 'MAX' : 'MIN';
+        }
       } else {
-        const padding = parentSource.layout?.padding ?? [0, 0, 0, 0];
-        const inner = parentSource.bounds.width - padding[1] - padding[3];
-        if (
-          !huggers.has(source.id) &&
-          (Math.abs(source.bounds.width - inner) <= 3 || source.layout?.widthSizing === 'fill')
-        )
+        // Fill only where it reproduces the measured width: the layer spans its parent's
+        // content box, and in a row it is the only item (two full-width items in a
+        // sliding row would each be squeezed to half).
+        const parentLayout = layoutOf(parentSource);
+        const edge = gridBorder(parentSource);
+        const inner =
+          parentSource.bounds.width -
+          parentLayout.padding[1] -
+          parentLayout.padding[3] -
+          edge[1] -
+          edge[3];
+        const alone =
+          mode !== 'horizontal' ||
+          parentSource.children.filter((c) => c.position !== 'absolute').length === 1;
+        if (!huggers.has(source.id) && alone && Math.abs(source.bounds.width - inner) <= 3)
           native.layoutSizingHorizontal = 'FILL';
       }
     }

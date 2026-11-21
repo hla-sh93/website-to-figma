@@ -8,7 +8,7 @@ export function captureGate(): string | null {
         box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
       );
     });
-  const text = document.body.innerText;
+  const text = document.body?.innerText ?? '';
   if (
     visible('form[action*="validateCaptcha"], #captchacharacters') ||
     (/just a moment|robot check|attention required|verify you are human/i.test(document.title) &&
@@ -36,7 +36,7 @@ export function pageFingerprint(): string {
   };
   return JSON.stringify([
     document.documentElement.scrollHeight,
-    hash(document.body.innerText),
+    hash(document.body?.innerText ?? ''),
     [...document.images]
       .slice(0, 1000)
       .map((image) => [image.currentSrc, image.complete, image.naturalWidth, image.naturalHeight]),
