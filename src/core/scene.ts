@@ -77,6 +77,8 @@ export type TextSpec = {
   direction: 'ltr' | 'rtl';
   sizing?: 'inline' | 'block';
   maxLines?: number;
+  /** Lines the browser laid the copy out on. */
+  lines?: number;
   resolvedFontFamily?: string;
   fontUsage?: FontUsage[];
   variationSettings?: Record<string, number>;
@@ -333,6 +335,7 @@ export function validateScene(input: unknown): ScenePackage {
     en(t.direction, p + '.direction', ['ltr', 'rtl']);
     optional(t, 'sizing', (v, q) => en(v, q, ['inline', 'block']), p);
     optional(t, 'maxLines', (v, q) => integer(v, q, 1, 1000), p);
+    optional(t, 'lines', (v, q) => integer(v, q, 1, 100000), p);
     fontProperties(t, p);
     optional(t, 'shadow', shadows, p);
     optional(

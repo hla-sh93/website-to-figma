@@ -13,8 +13,9 @@ export function textLineBoxes(root: SceneNode): void {
       const height = node.bounds.height;
       const ratio = height / text.lineHeight;
       // Block text already measures whole line boxes.
-      const lines =
-        Math.round(ratio) >= 1 && Math.abs(ratio - Math.round(ratio)) < 0.06
+      const lines = text.lines
+        ? text.lines
+        : Math.round(ratio) >= 1 && Math.abs(ratio - Math.round(ratio)) < 0.06
           ? Math.round(ratio)
           : Math.max(1, Math.round((height - text.fontSize * 1.9) / text.lineHeight) + 1);
       const lineBox = lines * text.lineHeight;

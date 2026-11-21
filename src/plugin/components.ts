@@ -56,6 +56,7 @@ export async function createComponents(
     instance: InstanceNode;
     updates: [string, number[]][];
     textSizing: TextNode['textAutoResize'][];
+    textWidths: number[];
   }[] = [];
   let components = 0,
     instances = 0;
@@ -119,13 +120,21 @@ export async function createComponents(
           const path = id ? pathTo(old, id) : undefined;
           if (path) updates.push([key, path]);
         }
-        prepared.push({ old, instance, updates, textSizing: sizing });
+        // Each member keeps its own text sizing: a two-line title must not inherit the
+        // one-line sizing of the member the component was made from.
+        prepared.push({
+          old,
+          instance,
+          updates,
+          textSizing: oldTexts.map((t, index) => t.textAutoResize ?? sizing[index] ?? 'HEIGHT'),
+          textWidths: oldTexts.map((t) => t.width),
+        });
         instances++;
       }
     }
     // No awaits during replacement: cancellation cannot interrupt this commit block.
     const grids = new Set<FrameNode>();
-    for (const { old, instance, updates, textSizing } of prepared) {
+    for (const { old, instance, updates, textSizing, textWidths } of prepared) {
       const parent = old.parent;
       if (!parent || !('insertChild' in parent))
         throw new Error('A source parent was removed during component creation.');
@@ -155,7 +164,12 @@ export async function createComponents(
       instance.layoutSizingHorizontal = widthMode;
       instance.layoutSizingVertical = heightMode;
       nativeTexts(instance).forEach((text, index) => {
-        text.textAutoResize = textSizing[index] ?? 'HEIGHT';
+        const mode = textSizing[index] ?? 'HEIGHT';
+        text.textAutoResize = mode;
+        const width = textWidths[index];
+        // Wrapping copy keeps the width it was measured at, unless its parent sizes it.
+        if (mode !== 'WIDTH_AND_HEIGHT' && width && text.layoutSizingHorizontal === 'FIXED')
+          text.resize(width, text.height);
       });
       for (const [key, path] of updates) {
         const node = atPath(instance, path);

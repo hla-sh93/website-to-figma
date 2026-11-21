@@ -574,6 +574,17 @@ export function collect(selector: string | undefined): {
       children: [],
     };
   };
+  // Lines as laid out by the browser: client rects that start a new row.
+  const lineCount = (range: Range): number => {
+    let lines = 0,
+      bottom = -Infinity;
+    for (const rect of range.getClientRects()) {
+      if (!rect.width || !rect.height) continue;
+      if (rect.top >= bottom - rect.height / 2) lines++;
+      bottom = Math.max(bottom, rect.bottom);
+    }
+    return Math.max(1, lines);
+  };
   const measuredText = (el: Element, node: Node, id: string): SceneNode | null => {
     if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) return null;
     const c = getComputedStyle(el);
@@ -610,6 +621,7 @@ export function collect(selector: string | undefined): {
         align: alignment(c),
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: 'inline',
+        lines: lineCount(range),
         ...textCase(c),
         ...textShadow(c),
       },
@@ -1448,6 +1460,7 @@ export function collect(selector: string | undefined): {
         align: alignment(c),
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: intrinsicText ? 'inline' : 'block',
+        lines: lineCount(textRange),
         ...(c.textOverflow === 'ellipsis' && c.whiteSpace === 'nowrap' ? { maxLines: 1 } : {}),
         ...textCase(c),
         ...textShadow(c),

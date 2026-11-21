@@ -267,6 +267,9 @@ export function rtlMark(text: { characters: string; direction: string }): string
   return first && STRONG_RTL.test(first) ? '' : '\u200f';
 }
 function isSingleLine(source: SceneNode): boolean {
+  // The browser's own line count when it was measured (a one-line label in a tall
+  // button is still one line); otherwise judged from the box height.
+  if (source.text?.lines !== undefined) return source.text.lines === 1;
   return (
     !!source.text &&
     !source.text.characters.includes('\n') &&
@@ -510,7 +513,7 @@ export async function renderScene(
     }
   };
   const huggers = new Set<string>();
-  const oneLineTexts: { node: TextNode; lineHeight: number }[] = [];
+  const oneLineTexts: { node: TextNode; lineHeight: number; width: number }[] = [];
   /** Makes the single-child chain under a shrink-wrapped box hug down to one line of copy. */
   const hugChain = (source: SceneNode, node: FrameNode, screenId: string): boolean => {
     const layout = layoutOf(source);
@@ -567,6 +570,12 @@ export async function renderScene(
       // layout pass, then changed.
       const wrapped = oneLineTexts.filter((t) => t.node.height > t.lineHeight * 1.5);
       for (const t of wrapped) t.node.textAutoResize = 'WIDTH_AND_HEIGHT';
+      // A line that needs much more room than it had (a far wider substitute font)
+      // would run over its neighbours; wrapping inside its own box is the lesser fault.
+      for (const t of wrapped.filter((t) => t.node.width > t.width * 1.15 + 4)) {
+        t.node.textAutoResize = 'HEIGHT';
+        t.node.resize(Math.max(0.01, t.width), t.node.height);
+      }
       oneLineTexts.length = 0;
       screens.push(native.id);
       offset += screen.root.bounds.width + 80;
@@ -1214,7 +1223,11 @@ export async function renderScene(
           isSingleLine(source) &&
           native.layoutSizingHorizontal !== 'FILL'
         )
-          oneLineTexts.push({ node: native, lineHeight: source.text!.lineHeight });
+          oneLineTexts.push({
+            node: native,
+            lineHeight: source.text!.lineHeight,
+            width: source.bounds.width,
+          });
         if (singleLine && positioned && native.width !== before) {
           // Keep the edge the browser aligned the line to.
           const align =
