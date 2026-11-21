@@ -1145,7 +1145,15 @@ export async function renderScene(
         const alone =
           mode !== 'horizontal' ||
           parentSource.children.filter((c) => c.position !== 'absolute').length === 1;
-        if (!huggers.has(source.id) && alone && Math.abs(source.bounds.width - inner) <= 3)
+        // A single line keeps its measured width instead of filling: it can then size
+        // itself if Figma's glyphs would wrap it (same place, since it spans the box).
+        const oneLine = native.type === 'TEXT' && isSingleLine(source);
+        if (
+          !huggers.has(source.id) &&
+          alone &&
+          !oneLine &&
+          Math.abs(source.bounds.width - inner) <= 3
+        )
           native.layoutSizingHorizontal = 'FILL';
       }
     }

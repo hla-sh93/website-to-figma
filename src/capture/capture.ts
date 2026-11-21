@@ -216,11 +216,21 @@ async function capture(
       const page = await newCapturePage();
       // Image downloads in flight, so waits can tell slow from finished.
       const imageDownloads = new Set<import('playwright').Request>();
+      // Scripts, data and media in flight: late widgets (players, carousels) build
+      // themselves from these after they scroll into view.
+      const widgetDownloads = new Set<import('playwright').Request>();
       page.on('request', (request) => {
-        if (request.resourceType() === 'image') imageDownloads.add(request);
+        const type = request.resourceType();
+        if (type === 'image') imageDownloads.add(request);
+        else if (['script', 'fetch', 'xhr', 'media', 'stylesheet', 'font'].includes(type))
+          widgetDownloads.add(request);
       });
-      page.on('requestfinished', (request) => imageDownloads.delete(request));
-      page.on('requestfailed', (request) => imageDownloads.delete(request));
+      const settled = (request: import('playwright').Request) => {
+        imageDownloads.delete(request);
+        widgetDownloads.delete(request);
+      };
+      page.on('requestfinished', settled);
+      page.on('requestfailed', settled);
       try {
         o.onProgress?.(`capture-${width}`);
         const started = Date.now();
@@ -374,6 +384,14 @@ async function capture(
             const outcome = await Promise.race([
               lateConsent,
               (async () => {
+                // Sections that build themselves when scrolled into view (video players,
+                // embedded widgets) get a moment to finish: until their downloads have
+                // been quiet for a second, eight seconds at most.
+                const settleBy = Date.now() + 8000;
+                for (let calm = 0; calm < 1000 && Date.now() < settleBy && !stop;) {
+                  calm = widgetDownloads.size ? 0 : calm + 200;
+                  await page.waitForTimeout(200);
+                }
                 // Lazy images outside the viewport (carousel slides, late sections) would
                 // never start loading; here every shown image is asked to load now.
                 await page
