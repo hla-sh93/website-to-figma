@@ -1,4 +1,10 @@
-import { chromium, type Browser, type BrowserContext } from 'playwright';
+import {
+  chromium,
+  request as playwrightRequest,
+  type APIRequestContext,
+  type Browser,
+  type BrowserContext,
+} from 'playwright';
 import { existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -57,8 +63,10 @@ async function capture(
     proxy: Awaited<ReturnType<typeof startEgressProxy>> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stop = false;
+  let downloads: APIRequestContext | undefined;
   const close = async () => {
     stop = true;
+    await downloads?.dispose().catch(() => {});
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
   };
@@ -177,10 +185,11 @@ async function capture(
           return;
         }
         bytes += body.length;
-        bodies.set(response.url(), {
-          mime: response.headers()['content-type']!.split(';')[0]!,
-          body,
-        });
+        const entry = { mime: response.headers()['content-type']!.split(';')[0]!, body };
+        bodies.set(response.url(), entry);
+        // A redirected image is known to the page by the address it asked for.
+        for (let from = response.request().redirectedFrom(); from; from = from.redirectedFrom())
+          bodies.set(from.url(), entry);
       } catch {}
     };
     const result: ScenePackage = {
@@ -205,6 +214,13 @@ async function capture(
         title: '',
       };
       const page = await newCapturePage();
+      // Image downloads in flight, so waits can tell slow from finished.
+      const imageDownloads = new Set<import('playwright').Request>();
+      page.on('request', (request) => {
+        if (request.resourceType() === 'image') imageDownloads.add(request);
+      });
+      page.on('requestfinished', (request) => imageDownloads.delete(request));
+      page.on('requestfailed', (request) => imageDownloads.delete(request));
       try {
         o.onProgress?.(`capture-${width}`);
         const started = Date.now();
@@ -357,27 +373,36 @@ async function capture(
           if (!imagesAwaited) {
             const outcome = await Promise.race([
               lateConsent,
-              page
-                .waitForFunction(
-                  () => {
-                    const pending = [...document.images].filter(
-                      (image) =>
-                        !image.complete &&
-                        image.getClientRects().length &&
-                        !(image.loading === 'lazy' && !image.currentSrc),
-                    ).length;
-                    // Progress keeps the wait alive; an image that never answers
-                    // (a blocked third party) ends it after eight quiet seconds.
-                    const state = window as unknown as { __pending?: number; __pendingAt?: number };
-                    if (state.__pending !== pending) {
-                      state.__pending = pending;
-                      state.__pendingAt = performance.now();
-                    }
-                    return pending === 0 || performance.now() - (state.__pendingAt ?? 0) > 8000;
-                  },
-                  undefined,
-                  { timeout: 30000, polling: 250 },
-                )
+              (async () => {
+                // Lazy images outside the viewport (carousel slides, late sections) would
+                // never start loading; here every shown image is asked to load now.
+                await page
+                  .evaluate(() => {
+                    for (const image of document.images)
+                      if (image.loading === 'lazy' && image.getClientRects().length)
+                        image.loading = 'eager';
+                  })
+                  .catch(() => {});
+                // The wait follows the network: it ends when every shown image is complete,
+                // or when images are still missing but no image download is active any
+                // more (nothing else will arrive). Slow downloads are given up to 45 s.
+                const deadline = Date.now() + 45000;
+                let quiet = 0;
+                while (Date.now() < deadline && !stop) {
+                  const pending = await page
+                    .evaluate(
+                      () =>
+                        [...document.images].filter(
+                          (image) => !image.complete && image.getClientRects().length,
+                        ).length,
+                    )
+                    .catch(() => 0);
+                  if (!pending) break;
+                  quiet = imageDownloads.size ? 0 : quiet + 250;
+                  if (quiet >= 2500) break;
+                  await page.waitForTimeout(250);
+                }
+              })()
                 .catch(() => {})
                 .then(async () => {
                   const pending = await page
@@ -562,6 +587,93 @@ async function capture(
                     : Buffer.from(decodeURIComponent(m[3]!)),
                 };
             }
+            // Images created by script (blob: URLs) never cross the network; their
+            // bytes are read from the page that holds them.
+            if (!asset && s.url.startsWith('blob:') && !bytesLimited) {
+              const read = await page
+                .evaluate(async (url) => {
+                  try {
+                    const blob = await (await fetch(url)).blob();
+                    if (blob.size > 8 * 1024 * 1024) return null;
+                    const bytes = new Uint8Array(await blob.arrayBuffer());
+                    let binary = '';
+                    for (let i = 0; i < bytes.length; i += 32768)
+                      binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+                    return { mime: blob.type, data: btoa(binary) };
+                  } catch {
+                    // A content security policy may forbid fetch(blob:). The image the
+                    // page already decoded is drawn instead, at up to three times its size.
+                    const image = [...document.images].find(
+                      (i) => i.currentSrc === url || i.src === url,
+                    );
+                    if (!image?.naturalWidth) return null;
+                    const scale = Math.max(
+                      1,
+                      Math.min(3, 2048 / Math.max(image.naturalWidth, image.naturalHeight)),
+                    );
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(image.naturalWidth * scale);
+                    canvas.height = Math.round(image.naturalHeight * scale);
+                    canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height);
+                    return {
+                      mime: 'image/png',
+                      data: canvas.toDataURL('image/png').split(',')[1]!,
+                    };
+                  }
+                }, s.url)
+                .catch(() => null);
+              if (read && read.mime.startsWith('image/')) {
+                const body = Buffer.from(read.data, 'base64');
+                if (bytes + body.length <= MAX_IMAGE_BYTES) {
+                  bytes += body.length;
+                  asset = { mime: read.mime.split(';')[0]!, body };
+                }
+              }
+            }
+            // Only through the egress proxy, which admits public addresses alone; owned
+            // fixtures have no proxy and download nothing.
+            if (!asset && /^https?:/.test(s.url) && !bytesLimited && proxy) {
+              downloads ??= await playwrightRequest.newContext({
+                proxy: { server: proxy.url, username: proxy.username, password: proxy.password },
+              });
+              const again = await downloads
+                .get(s.url, { timeout: 20000, failOnStatusCode: true })
+                .catch(() => null);
+              const mime = again?.headers()['content-type']?.split(';')[0] ?? '';
+              if (again && mime.startsWith('image/')) {
+                const body = await again.body().catch(() => null);
+                if (body && bytes + body.length <= MAX_IMAGE_BYTES) {
+                  bytes += body.length;
+                  asset = { mime, body };
+                  bodies.set(s.url, asset);
+                }
+              }
+            }
+            // Last resort for a picture the page shows but whose bytes cannot be read (a
+            // revoked blob, a changing animated source): keep what is painted there.
+            // A broken image (nothing decoded) stays a reported missing asset.
+            if (
+              !asset &&
+              s.kind === 'image' &&
+              !s.background &&
+              !s.mediaFrame &&
+              n.image &&
+              // Script-made sources can report no size while they are being swapped.
+              (s.width > 0 || !/^https?:/.test(s.url))
+            ) {
+              s.mediaFrame = true;
+              s.url = 'frame:image';
+              n.image = { fit: 'fill', position: [0.5, 0.5] };
+              local.issues.push({
+                code: 'raster-fallback',
+                severity: 'info',
+                message:
+                  'Image source could not be read; kept as a picture of what the page showed.',
+                screenId,
+                nodeId: n.id,
+              });
+              return;
+            }
             if (!asset || asset.body.length > 4 * MAX_ASSET_BYTES) {
               n.kind = 'frame';
               local.issues.push({
@@ -576,7 +688,7 @@ async function capture(
             // SVG response images are sanitized using the browser DOM before packaging.
             // The artwork fills its box without letterboxing or stretching.
             const sameAspect = (svg: string, box: { width: number; height: number }) => {
-              const view = /viewBox="s*[-d.]+[s,]+[-d.]+[s,]+([d.]+)[s,]+([d.]+)/.exec(svg);
+              const view = /viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(svg);
               if (!view || !box.height) return false;
               const ratio = Number(view[1]) / Number(view[2]);
               return Math.abs(ratio - box.width / box.height) <= 0.02 * ratio;
@@ -618,6 +730,8 @@ async function capture(
                 !s.background &&
                 // Icons and logos only: larger artwork behaves like a photo (crop, fit).
                 Math.max(n.bounds.width, n.bounds.height) <= 240 &&
+                // An image cut by the capture boundary keeps its crop geometry.
+                n.bounds.y + n.bounds.height <= 16000 &&
                 (n.image?.fit === 'fill' || n.image?.fit === 'contain') &&
                 sanitized.length <= 60000 &&
                 sameAspect(sanitized, n.bounds) &&

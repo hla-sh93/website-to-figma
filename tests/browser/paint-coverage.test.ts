@@ -49,6 +49,14 @@ body{margin:0;font:16px Arial}
 <div id="rotated"></div>
 <svg style="display:none"><symbol id="sprite-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6" fill="none" stroke="currentColor" stroke-width="2"/></symbol></svg>
 <svg id="sprite-icon" style="width:18px;height:18px;color:rgb(255,0,0)"><use href="#sprite-check"></use></svg>
+<img id="logo-svg" width="48" height="24" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 24'%3E%3Crect width='48' height='24' fill='rgb(0,90,200)'/%3E%3C/svg%3E">
+<img id="blob-logo" width="300" height="60">
+<script>
+  document.getElementById('blob-logo').src = URL.createObjectURL(new Blob(
+    ['<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60" viewBox="0 0 300 60"><rect width="300" height="60" fill="rgb(120,0,200)"/></svg>'],
+    { type: 'image/svg+xml' },
+  ));
+</script>
 <p id="upper">Read more</p>
 <p id="shadowed">Shadow</p>
 <p id="gradient-text">Gradient</p>
@@ -173,4 +181,19 @@ test('sprite icons carry the referenced symbol inside the exported SVG', () => {
   assert.match(svg, /M4 12l5 5L20 6/);
   assert.match(svg, /stroke="rgb\(255, 0, 0\)"/);
   assert.doesNotMatch(svg, /<use/);
+});
+
+test('small SVG files shown through <img> stay editable vectors', () => {
+  const logo = byKey('logo-svg');
+  assert.equal(logo.kind, 'svg');
+  const asset = scene.assets.find((a) => a.id === logo.assetId)!;
+  assert.equal(asset.kind, 'svg');
+  assert.match(Buffer.from(asset.data, 'base64').toString(), /viewBox="0 0 48 24"/);
+});
+
+test('images created by script from blob URLs are captured from the page', () => {
+  const logo = byKey('blob-logo');
+  assert.notEqual(logo.kind, 'frame');
+  assert.ok(scene.assets.some((a) => a.id === logo.assetId));
+  assert.ok(!scene.issues.some((i) => i.code === 'missing-asset' && i.nodeId === logo.id));
 });
