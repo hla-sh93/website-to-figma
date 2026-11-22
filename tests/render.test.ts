@@ -724,3 +724,51 @@ test('transparent gradient stops fade the neighbouring colour', () => {
   );
   assert.deepEqual(paint.gradientStops[1]!.color, { r: 1, g: 1, b: 1, a: 0 });
 });
+
+test('a wrapping column with several measured columns keeps positions; one column stays a column', async () => {
+  const item = (id: string, x: number, y: number) =>
+    node(id, { position: 'flow', bounds: { x, y, width: 220, height: 33 } });
+  const { byId } = await render(
+    scene([
+      node('two', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 487, height: 66 },
+        layout: flowLayout('vertical', { wrap: true }),
+        children: [item('a', 0, 0), item('b', 0, 33), item('c', 252, 0), item('d', 252, 33)],
+      }),
+      node('one', {
+        position: 'flow',
+        bounds: { x: 0, y: 100, width: 220, height: 66 },
+        layout: flowLayout('vertical', { wrap: true }),
+        children: [item('e', 0, 100), item('f', 0, 133)],
+      }),
+    ]),
+  );
+  assert.equal(byId('two').layoutMode, 'NONE');
+  assert.equal(byId('c').x, 252);
+  assert.equal(byId('one').layoutMode, 'VERTICAL');
+});
+
+test('grid rows use the measured gap when item margins add to the CSS gap', async () => {
+  const { byId } = await render(
+    scene([
+      node('grid', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 296, height: 120 },
+        layout: {
+          ...flowLayout('vertical'),
+          mode: 'grid',
+          gap: 16,
+          rowGap: 0,
+          columns: 1,
+          tracks: [296],
+        },
+        children: [
+          node('title', { position: 'flow', bounds: { x: 0, y: 0, width: 296, height: 64 } }),
+          node('more', { position: 'flow', bounds: { x: 0, y: 72, width: 86, height: 48 } }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('grid').gridRowGap, 8);
+});
