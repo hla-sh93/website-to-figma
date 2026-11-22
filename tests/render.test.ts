@@ -817,15 +817,19 @@ test('colours declared as page tokens take the token name', async () => {
   ]);
   pkg.tokens = {
     colors: [
+      { name: 'button-danger-fill-hover', value: red },
       { name: 'primary', value: red },
-      { name: 'danger', value: red },
+      { name: 'search-input-text', value: black },
+      { name: 'footer-link-text', value: black },
     ],
   };
   const { variables } = await render(pkg);
   const names = variables.map((v) => v.name);
   assert.ok(names.includes('color/primary'));
   assert.ok(names.includes('color/#000000'));
-  assert.ok(!names.includes('color/danger') && !names.includes('color/#ff0000'));
+  // The general name wins; component-level names that share a colour do not name it.
+  assert.ok(!names.includes('color/button-danger-fill-hover') && !names.includes('color/#ff0000'));
+  assert.ok(!names.includes('color/search-input-text'));
 });
 
 test('text styles are named by use, and a second import reuses styles and colours', async () => {

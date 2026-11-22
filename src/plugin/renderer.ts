@@ -87,16 +87,29 @@ const typeKey = (text: TextSpec) =>
  */
 export function textRoles(pkg: ScenePackage): Map<string, string> {
   const tally = new Map<string, Record<string, number>>();
+  const counted = new Map<SceneNode, number>();
+  const texts = (node: SceneNode): number => {
+    let count = counted.get(node);
+    if (count === undefined) {
+      count = (node.text ? 1 : 0) + node.children.reduce((sum, child) => sum + texts(child), 0);
+      counted.set(node, count);
+    }
+    return count;
+  };
   const visit = (node: SceneNode, trail: SceneNode[]) => {
     if (node.text) {
       const near = [node, ...trail.slice(0, 4)];
-      const is = (tags: RegExp, roles: RegExp) =>
-        near.some((n) => tags.test(n.source.tag) || roles.test(n.source.role ?? ''));
-      const use = is(/^h[1-6]$/i, /^heading$/)
-        ? 'heading'
-        : is(/^(button|a|label|summary|th)$/i, /^(button|link|tab|menuitem)$/)
-          ? 'label'
-          : 'body';
+      const heading = near.some(
+        (n) => /^h[1-6]$/i.test(n.source.tag) || n.source.role === 'heading',
+      );
+      // A button or link is a label when the text is its caption, not when it wraps
+      // a whole card of copy.
+      const control = near.find(
+        (n) =>
+          /^(button|a|label|summary|th)$/i.test(n.source.tag) ||
+          /^(button|link|tab|menuitem)$/.test(n.source.role ?? ''),
+      );
+      const use = heading ? 'heading' : control && texts(control) <= 2 ? 'label' : 'body';
       const counts = tally.get(typeKey(node.text)) ?? {};
       counts[use] = (counts[use] ?? 0) + 1;
       tally.set(typeKey(node.text), counts);
@@ -110,7 +123,7 @@ export function textRoles(pkg: ScenePackage): Map<string, string> {
     const size = Number(key.split('|')[3]);
     roles.set(
       key,
-      use === 'label'
+      use === 'label' && size < 24
         ? 'Label'
         : use === 'heading' || size >= 32
           ? size >= 56
@@ -506,10 +519,20 @@ export async function renderScene(
   staging.x = right + 120;
   staging.y = 0;
   const colorKey = (c: RGBA) => [c.r, c.g, c.b, c.a].map((v) => v.toFixed(5)).join('/');
-  // The first token declared with a colour names it; later ones are aliases.
+  // Several tokens often share one colour. The most general name wins ("white" over
+  // "search-input-background"); when only component-level names share it, none of them
+  // describes the colour and it keeps its value as the name.
   const tokenNames = new Map<string, string>();
-  for (const token of pkg.tokens?.colors ?? [])
-    if (!tokenNames.has(colorKey(token.value))) tokenNames.set(colorKey(token.value), token.name);
+  const aliases = new Map<string, string[]>();
+  for (const token of pkg.tokens?.colors ?? []) {
+    const key = colorKey(token.value);
+    aliases.set(key, [...(aliases.get(key) ?? []), token.name]);
+  }
+  const parts = (name: string) => name.split(/[-_.]/).length;
+  for (const [key, names] of aliases) {
+    const best = [...names].sort((a, b) => parts(a) - parts(b) || a.length - b.length)[0]!;
+    if (names.length === 1 || parts(best) <= 2) tokenNames.set(key, best);
+  }
   const paint = (c: RGBA): SolidPaint => {
     let result = solid(c);
     if (options.foundations === false) return result;
