@@ -562,10 +562,16 @@ export async function renderScene(
   };
   // Give Figma's event loop a turn so the canvas, progress messages and
   // cancellation stay responsive during large imports.
+  // When Figma is in the background its timers are throttled to about a second each;
+  // yielding every 32 ms would then stretch an import to many minutes. A slow turn
+  // widens the interval, a fast one restores it.
+  let yieldEvery = 32;
   const breathe = async () => {
-    if (Date.now() - lastYield < 32) return;
+    if (Date.now() - lastYield < yieldEvery) return;
+    const before = Date.now();
     await new Promise((resolve) => setTimeout(resolve, 0));
     lastYield = Date.now();
+    yieldEvery = lastYield - before > 200 ? 1500 : 32;
   };
   try {
     let offset = 0;
