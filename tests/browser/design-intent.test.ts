@@ -5,10 +5,11 @@ import { flatten } from '../../src/core/analysis.js';
 import type { SceneNode } from '../../src/core/scene.js';
 
 const html = `<!doctype html><html><head><style>
+:root{--color-primary:#0a66c2;--brand-accent:rgb(255, 90, 0);--surface:220 20% 96%;--space-4:16px;--font:Arial}
 body{margin:0;font:16px Arial}
 #bar{display:flex;width:600px}
 #logo{width:120px;height:80px;background:rgb(0,0,0)}
-#search{flex:1;background:rgb(220,220,220)}
+#search{flex:1;background:var(--color-primary)}
 #side{width:100px;background:rgb(0,120,200)}
 #top{width:100px;height:20px;align-self:flex-start;background:rgb(200,0,0)}
 @keyframes rise{from{opacity:0;transform:translateY(60px)}to{opacity:1;transform:none}}
@@ -39,4 +40,13 @@ test('an entrance animation is captured at its final state', () => {
   const hero = byKey('hero');
   assert.equal(hero.style.opacity, 1);
   assert.equal(hero.bounds.y, 80);
+});
+
+test('colour custom properties are captured as named tokens', () => {
+  const tokens = Object.fromEntries(scene.tokens!.colors.map((t) => [t.name, t.value]));
+  assert.deepEqual(Object.keys(tokens), ['primary', 'brand-accent', 'surface']);
+  assert.equal(Math.round(tokens.primary!.b * 255), 194);
+  assert.equal(Math.round(tokens['brand-accent']!.r * 255), 255);
+  // "220 20% 96%" is read as hsl().
+  assert.ok(tokens.surface!.r > 0.9 && tokens.surface!.b > tokens.surface!.r);
 });

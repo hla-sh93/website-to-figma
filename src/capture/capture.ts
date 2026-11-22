@@ -14,6 +14,7 @@ import {
   type SceneAsset,
   type SceneIssue,
   type SceneScreen,
+  type ColorToken,
 } from '../core/scene.js';
 import { assertPublicUrl } from '../service/network-policy.js';
 import { startEgressProxy } from '../service/egress-proxy.js';
@@ -211,6 +212,7 @@ async function capture(
         assets: [] as SceneAsset[],
         issues: [] as SceneIssue[],
         screens: [] as SceneScreen[],
+        tokens: [] as ColorToken[],
         title: '',
       };
       const page = await newCapturePage();
@@ -564,6 +566,7 @@ async function capture(
             ),
           ) as ReturnType<typeof collect>;
           trace('collector returned');
+          local.tokens = data.tokens;
           const screenId = `viewport-${width}`;
           const nodes = new Map<string, SceneNode>();
           const visit = (n: SceneNode) => {
@@ -1040,6 +1043,8 @@ async function capture(
       else throw attempt.reason;
     }
     result.capture.title = captured.find((c) => c.title)?.title ?? '';
+    const tokens = captured.find((c) => c.tokens.length)?.tokens;
+    if (tokens) result.tokens = { colors: tokens };
     const assetIds = new Set<string>();
     for (const part of captured) {
       for (const asset of part.assets)

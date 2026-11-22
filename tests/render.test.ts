@@ -809,3 +809,21 @@ test('authored grow and stretch become fill only where the picture stays the sam
   assert.notEqual(byId('logo').layoutSizingHorizontal, 'FILL');
   assert.notEqual(byId('short').layoutSizingHorizontal, 'FILL');
 });
+
+test('colours declared as page tokens take the token name', async () => {
+  const pkg = scene([
+    node('brand', { style: { opacity: 1, background: red } }),
+    node('ink', { style: { opacity: 1, background: black } }),
+  ]);
+  pkg.tokens = {
+    colors: [
+      { name: 'primary', value: red },
+      { name: 'danger', value: red },
+    ],
+  };
+  const { variables } = await render(pkg);
+  const names = variables.map((v) => v.name);
+  assert.ok(names.includes('color/primary'));
+  assert.ok(names.includes('color/#000000'));
+  assert.ok(!names.includes('color/danger') && !names.includes('color/#ff0000'));
+});

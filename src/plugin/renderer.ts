@@ -412,15 +412,24 @@ export async function renderScene(
   const right = api.currentPage.children.reduce((max, n) => Math.max(max, n.x + n.width), 0);
   staging.x = right + 120;
   staging.y = 0;
+  const colorKey = (c: RGBA) => [c.r, c.g, c.b, c.a].map((v) => v.toFixed(5)).join('/');
+  // The first token declared with a colour names it; later ones are aliases.
+  const tokenNames = new Map<string, string>();
+  for (const token of pkg.tokens?.colors ?? [])
+    if (!tokenNames.has(colorKey(token.value))) tokenNames.set(colorKey(token.value), token.name);
   const paint = (c: RGBA): SolidPaint => {
     let result = solid(c);
     if (options.foundations === false) return result;
     collection ??= api.variables.createVariableCollection(`${prefix} / Foundations`);
     if (!cleanup.includes(collection)) cleanup.push(collection);
-    const key = [c.r, c.g, c.b, c.a].map((v) => v.toFixed(5)).join('/');
+    const key = colorKey(c);
     let variable = colors.get(key);
     if (!variable) {
-      variable = api.variables.createVariable(`color/${colorName(c)}`, collection, 'COLOR');
+      variable = api.variables.createVariable(
+        `color/${tokenNames.get(key) ?? colorName(c)}`,
+        collection,
+        'COLOR',
+      );
       variable.scopes = ['FRAME_FILL', 'SHAPE_FILL', 'TEXT_FILL', 'STROKE_COLOR'];
       variable.setValueForMode(collection.defaultModeId, c);
       colors.set(key, variable);

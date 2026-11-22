@@ -15,6 +15,7 @@ export function collect(selector: string | undefined): {
   issues: SceneIssue[];
   sources: CaptureAssetSource[];
   textSources: { nodeId: string; selector: string }[];
+  tokens: { name: string; value: { r: number; g: number; b: number; a: number } }[];
 } {
   const issues: SceneIssue[] = [],
     sources: CaptureAssetSource[] = [];
@@ -1799,6 +1800,77 @@ export function collect(selector: string | undefined): {
     node.style.size = { width: width * t.sx, height: height * Math.abs(t.sy) };
     return node;
   };
+  // Colours the page names itself: custom properties declared in its style sheets,
+  // with the value they have on the root element.
+  const colorTokens = () => {
+    const names: string[] = [],
+      seen = new Set<string>();
+    const scan = (rules: CSSRuleList) => {
+      for (const rule of Array.from(rules)) {
+        const style = (rule as CSSStyleRule).style;
+        if (style)
+          for (let i = 0; i < style.length; i++) {
+            const name = style[i]!;
+            if (name.startsWith('--') && !seen.has(name) && seen.size < 2000) {
+              seen.add(name);
+              names.push(name);
+            }
+          }
+        const nested = (rule as CSSGroupingRule).cssRules;
+        if (nested) scan(nested);
+      }
+    };
+    for (const sheet of Array.from(document.styleSheets)) {
+      try {
+        scan(sheet.cssRules);
+      } catch {
+        // A style sheet from another origin cannot be read.
+      }
+    }
+    const rootStyle = getComputedStyle(document.documentElement);
+    const parse = (value: string) => {
+      // An invalid value leaves the canvas colour untouched; two different starting
+      // colours tell a real colour from a value that is not one.
+      const read = (start: string) => {
+        colorContext.fillStyle = start;
+        colorContext.fillStyle = value;
+        return String(colorContext.fillStyle);
+      };
+      return read('#010203') === read('#030201') ? color(value) : undefined;
+    };
+    const tokens: { name: string; value: { r: number; g: number; b: number; a: number } }[] = [],
+      used = new Set<string>();
+    for (const raw of names) {
+      if (/^--(tw|un|chakra-ring|swiper|fa|bs-gutter)-/.test(raw)) continue;
+      const value = rootStyle.getPropertyValue(raw).trim();
+      if (
+        !value ||
+        value.length > 80 ||
+        /^(inherit|initial|unset|transparent|currentcolor|none)$/i.test(value)
+      )
+        continue;
+      // "220 90% 50%" is a colour written for hsl(var(--name)).
+      const parsed =
+        parse(value) ??
+        (/^-?[\d.]+(deg)?[ ,]+[\d.]+%[ ,]+[\d.]+%$/.test(value)
+          ? parse('hsl(' + value + ')')
+          : undefined);
+      if (!parsed || parsed.a === 0) continue;
+      const name = raw
+        .replace(/^--/, '')
+        .split('--')
+        .filter((part) => !/^(wp|preset|color|colors|colour|global|e|theme)$/.test(part))
+        .join('-')
+        .replace(/^(color|colors|colour|clr)-/, '')
+        .replace(/-(color|colour)$/, '')
+        .slice(0, 80);
+      if (!name || used.has(name)) continue;
+      used.add(name);
+      tokens.push({ name, value: parsed });
+      if (tokens.length >= 300) break;
+    }
+    return tokens;
+  };
   const el = selector ? document.querySelector(selector) : document.body;
   if (!el) throw new Error('Capture selector was not found');
   const root = build(el, 'root', 0);
@@ -1809,5 +1881,5 @@ export function collect(selector: string | undefined): {
       severity: 'warning',
       message: `${omitted} deeply nested or over-budget region(s) were left out of the editable layers.`,
     });
-  return { root, issues, sources, textSources };
+  return { root, issues, sources, textSources, tokens: colorTokens() };
 }

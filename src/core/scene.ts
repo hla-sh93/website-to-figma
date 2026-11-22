@@ -164,7 +164,10 @@ export type ScenePackage = {
   screens: SceneScreen[];
   assets: SceneAsset[];
   issues: SceneIssue[];
+  /** Design tokens the page declares as CSS custom properties. */
+  tokens?: { colors: ColorToken[] };
 };
+export type ColorToken = { name: string; value: RGBA };
 type Obj = Record<string, any>;
 const fail = (path: string): never => {
   throw new Error(`Invalid scene: ${path}`);
@@ -536,6 +539,20 @@ export function validateScene(input: unknown): ScenePackage {
     );
     node(screen.root, p + '.root', ids, 1);
   }
+  optional(
+    s,
+    'tokens',
+    (v, p) => {
+      for (const [i, t] of arr(obj(v, p).colors, p + '.colors', 400).entries()) {
+        const q = `${p}.colors[${i}]`,
+          token = obj(t, q);
+        str(token.name, q + '.name');
+        if (!token.name || token.name.length > 80) fail(q + '.name must be 1 to 80 characters');
+        color(token.value, q + '.value');
+      }
+    },
+    'scene',
+  );
   for (const [i, v] of arr(s.issues, 'issues', 5000).entries()) {
     const p = `issues[${i}]`,
       issue = obj(v, p);
