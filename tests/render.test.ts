@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderScene } from '../src/plugin/renderer.js';
+import { renderScene, textRoles } from '../src/plugin/renderer.js';
 import { gradientPaint, gradientTransform, utf8Decode, colorName } from '../src/plugin/paint.js';
 import type { ScenePackage, SceneNode, TextSpec } from '../src/core/scene.js';
 import { createFakeFigma } from './fake-figma.js';
@@ -826,4 +826,47 @@ test('colours declared as page tokens take the token name', async () => {
   assert.ok(names.includes('color/primary'));
   assert.ok(names.includes('color/#000000'));
   assert.ok(!names.includes('color/danger') && !names.includes('color/#ff0000'));
+});
+
+test('text styles are named by use, and a second import reuses styles and colours', async () => {
+  const label = (id: string, tag: string, spec: Partial<TextSpec>, y: number) =>
+    node(id + '-box', {
+      source: { tag, key: id + '-box' },
+      bounds: { x: 0, y, width: 300, height: 40 },
+      children: [
+        node(id, {
+          kind: 'text',
+          source: { tag: 'span', key: id },
+          bounds: { x: 0, y, width: 300, height: 40 },
+          text: text(id, spec),
+        }),
+      ],
+    });
+  const pkg = () =>
+    scene([
+      label('title', 'h1', { fontSize: 40, lineHeight: 48, fontWeight: 700 }, 0),
+      label('copy', 'p', {}, 60),
+      label('cta', 'button', { fontSize: 14, fontWeight: 600 }, 120),
+      label('note', 'p', { fontSize: 11, lineHeight: 14 }, 180),
+    ]);
+  assert.deepEqual([...textRoles(pkg()).values()], ['Heading', 'Body', 'Label', 'Caption']);
+  const figma = createFakeFigma([
+    { family: 'Inter', style: 'Regular' },
+    { family: 'Inter', style: 'Semi Bold' },
+    { family: 'Inter', style: 'Bold' },
+  ]);
+  const first = await renderScene(figma.api, pkg(), { components: false });
+  const names = figma.styles.map((s) => s.name);
+  assert.deepEqual(names, [
+    'example.test / Heading / 40 Bold',
+    'example.test / Body / 16 Regular',
+    'example.test / Label / 14 SemiBold',
+    'example.test / Caption / 11 Regular',
+  ]);
+  const variables = figma.variables.length;
+  const second = await renderScene(figma.api, pkg(), { components: false });
+  assert.equal(figma.styles.length, names.length);
+  assert.equal(figma.variables.length, variables);
+  assert.ok(first.stats.textStyles === 4 && second.stats.textStyles === 0);
+  assert.equal(second.stats.variables, 0);
 });

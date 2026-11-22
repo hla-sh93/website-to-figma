@@ -4,6 +4,7 @@ import {
   type ScenePackage,
   type SceneNode,
   type RGBA,
+  type TextSpec,
 } from '../core/scene.js';
 import { blurEffect, colorName, gradientPaint, shadowEffect, utf8Decode } from './paint.js';
 import { createComponents } from './components.js';
@@ -58,6 +59,70 @@ export type RenderResult = {
   };
 };
 
+const WEIGHTS: Record<number, string> = {
+  100: 'Thin',
+  200: 'ExtraLight',
+  300: 'Light',
+  400: 'Regular',
+  500: 'Medium',
+  600: 'SemiBold',
+  700: 'Bold',
+  800: 'ExtraBold',
+  900: 'Black',
+};
+const typeKey = (text: TextSpec) =>
+  [
+    text.fontFamily,
+    text.fontWeight,
+    text.fontStyle,
+    text.fontSize,
+    text.lineHeight,
+    text.letterSpacing,
+    text.textDecoration ?? 'none',
+    text.textCase ?? 'original',
+  ].join('|');
+/**
+ * What each kind of text is used for on the page, by the elements it sits in:
+ * Display, Heading, Body, Label (buttons and links) or Caption.
+ */
+export function textRoles(pkg: ScenePackage): Map<string, string> {
+  const tally = new Map<string, Record<string, number>>();
+  const visit = (node: SceneNode, trail: SceneNode[]) => {
+    if (node.text) {
+      const near = [node, ...trail.slice(0, 4)];
+      const is = (tags: RegExp, roles: RegExp) =>
+        near.some((n) => tags.test(n.source.tag) || roles.test(n.source.role ?? ''));
+      const use = is(/^h[1-6]$/i, /^heading$/)
+        ? 'heading'
+        : is(/^(button|a|label|summary|th)$/i, /^(button|link|tab|menuitem)$/)
+          ? 'label'
+          : 'body';
+      const counts = tally.get(typeKey(node.text)) ?? {};
+      counts[use] = (counts[use] ?? 0) + 1;
+      tally.set(typeKey(node.text), counts);
+    }
+    for (const child of node.children) visit(child, [node, ...trail]);
+  };
+  for (const screen of pkg.screens) visit(screen.root, []);
+  const roles = new Map<string, string>();
+  for (const [key, counts] of tally) {
+    const use = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]![0];
+    const size = Number(key.split('|')[3]);
+    roles.set(
+      key,
+      use === 'label'
+        ? 'Label'
+        : use === 'heading' || size >= 32
+          ? size >= 56
+            ? 'Display'
+            : 'Heading'
+          : size <= 12
+            ? 'Caption'
+            : 'Body',
+    );
+  }
+  return roles;
+}
 export function captureHost(url: string): string {
   return /^https?:\/\//i.test(url)
     ? url
@@ -403,6 +468,34 @@ export async function renderScene(
   const colors = new Map<string, Variable>();
   const numbers = new Map<number, Variable>();
   let collection: VariableCollection | undefined;
+  // Colours, spacing and text styles belong to the site, not to one import: a second
+  // import of the same site uses what the first one made.
+  const host = captureHost(pkg.capture.url);
+  const known = new Map<string, Variable>();
+  let knownStyles: TextStyle[] = [];
+  const styleNames = new Set<string>();
+  if (options.foundations !== false) {
+    collection = (await api.variables.getLocalVariableCollectionsAsync()).find(
+      (c) => c.name === `${host} / Foundations`,
+    );
+    if (collection)
+      for (const variable of await api.variables.getLocalVariablesAsync())
+        if (variable.variableCollectionId === collection.id) known.set(variable.name, variable);
+    knownStyles = (await api.getLocalTextStylesAsync()).filter((s) =>
+      s.name.startsWith(`${host} / `),
+    );
+    for (const style of knownStyles) styleNames.add(style.name);
+    check();
+  }
+  const roles = textRoles(pkg);
+  const foundations = () => {
+    if (!collection) {
+      collection = api.variables.createVariableCollection(`${host} / Foundations`);
+      cleanup.push(collection);
+    }
+    return collection;
+  };
+  const knownValue = (name: string) => known.get(name)?.valuesByMode[foundations().defaultModeId];
   const prefix = `Import / ${captureHost(pkg.capture.url)} / ${pkg.capture.id.slice(0, 8)}`;
   const staging = api.createFrame();
   cleanup.push(staging);
@@ -420,16 +513,22 @@ export async function renderScene(
   const paint = (c: RGBA): SolidPaint => {
     let result = solid(c);
     if (options.foundations === false) return result;
-    collection ??= api.variables.createVariableCollection(`${prefix} / Foundations`);
-    if (!cleanup.includes(collection)) cleanup.push(collection);
+    const collection = foundations();
     const key = colorKey(c);
     let variable = colors.get(key);
+    let name = `color/${tokenNames.get(key) ?? colorName(c)}`;
+    const before = knownValue(name) as Partial<RGBA> | undefined;
+    if (!variable && before) {
+      const same =
+        typeof before.r === 'number' &&
+        colorKey({ r: before.r, g: before.g!, b: before.b!, a: before.a ?? 1 }) === key;
+      if (same) {
+        variable = known.get(name)!;
+        colors.set(key, variable);
+      } else if (tokenNames.has(key)) name += ` ${colorName(c)}`; // the site changed this token
+    }
     if (!variable) {
-      variable = api.variables.createVariable(
-        `color/${tokenNames.get(key) ?? colorName(c)}`,
-        collection,
-        'COLOR',
-      );
+      variable = api.variables.createVariable(name, collection, 'COLOR');
       variable.scopes = ['FRAME_FILL', 'SHAPE_FILL', 'TEXT_FILL', 'STROKE_COLOR'];
       variable.setValueForMode(collection.defaultModeId, c);
       colors.set(key, variable);
@@ -461,17 +560,17 @@ export async function renderScene(
   ) => {
     node[field] = value;
     if (options.foundations === false) return;
-    collection ??= api.variables.createVariableCollection(`${prefix} / Foundations`);
-    if (!cleanup.includes(collection)) cleanup.push(collection);
+    const collection = foundations();
     value = Math.round(value * 100) / 100;
     node[field] = value;
     let variable = numbers.get(value);
+    const name = `space/${String(value).replace('.', '_')}`;
+    if (!variable && knownValue(name) === value) {
+      variable = known.get(name)!;
+      numbers.set(value, variable);
+    }
     if (!variable) {
-      variable = api.variables.createVariable(
-        `space/${String(Math.round(value * 100) / 100).replace('.', '_')}`,
-        collection,
-        'FLOAT',
-      );
+      variable = api.variables.createVariable(name, collection, 'FLOAT');
       variable.scopes = ['GAP', 'WIDTH_HEIGHT'];
       variable.setValueForMode(collection.defaultModeId, value);
       numbers.set(value, variable);
@@ -747,8 +846,30 @@ export async function renderScene(
       if (options.foundations !== false) {
         let style = textStyles.get(styleKey);
         if (!style) {
+          const font = node.fontName as FontName;
+          const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+          style = knownStyles.find(
+            (s) =>
+              s.fontName.family === font.family &&
+              s.fontName.style === font.style &&
+              s.fontSize === text.fontSize &&
+              equal(s.lineHeight, node.lineHeight) &&
+              equal(s.letterSpacing, node.letterSpacing) &&
+              s.textDecoration === node.textDecoration &&
+              s.textCase === node.textCase,
+          );
+          if (style) textStyles.set(styleKey, style);
+        }
+        if (!style) {
           style = api.createTextStyle();
-          style.name = `${prefix} / Type / ${text.fontSize}-${text.fontWeight}-${textStyles.size + 1}`;
+          const size = Math.round(text.fontSize * 100) / 100;
+          const base = `${host} / ${roles.get(typeKey(text)) ?? 'Body'} / ${size} ${
+            WEIGHTS[Math.round(text.fontWeight / 100) * 100] ?? text.fontWeight
+          }${text.fontStyle === 'italic' ? ' Italic' : ''}`;
+          let name = base;
+          for (let n = 2; styleNames.has(name); n++) name = `${base} · ${n}`;
+          styleNames.add(name);
+          style.name = name;
           style.fontName = node.fontName as FontName;
           style.fontSize = text.fontSize;
           style.lineHeight = node.lineHeight;

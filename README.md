@@ -88,7 +88,7 @@ Latest verification: 80 unit/API tests and 53 Chromium tests pass. Two Arabic st
 - Repeating or sized gradients are drawn once across the box; different border colours per side use one stroke colour.
 - Browser and Figma glyph metrics differ slightly (emoji in particular), and unavailable fonts change wrapping.
 - Moving content is captured at one frame; carousels show whichever slide was active.
-- Each import adds its own text styles and variable collection.
+- Text styles and variables are kept per site and reused by later imports of that site; colours take the names of the page's CSS custom properties when it declares them. Tokens overridden inside a section (a dark block, for example) keep the root value's name only where the colour matches.
 - Exact CSS breakpoints are not recovered: each captured width is a separate frame.
 - Private pages, production hosting and publishing to the Figma Community are out of scope.
 

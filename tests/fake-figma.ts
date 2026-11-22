@@ -110,6 +110,7 @@ for (const method of [
 export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }]) {
   const page = new FakeNode('PAGE');
   const variables: Any[] = [];
+  const collections: Any[] = [];
   const styles: Any[] = [];
   const images: Any[] = [];
   const all: FakeNode[] = [];
@@ -156,6 +157,7 @@ export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }])
       images.push(image);
       return image;
     },
+    getLocalTextStylesAsync: async () => styles.filter((style) => !style.removed),
     createTextStyle() {
       const style: Any = { id: `S:${styles.length + 1}`, removed: false };
       style.remove = () => (style.removed = true);
@@ -163,12 +165,27 @@ export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }])
       return style;
     },
     variables: {
+      getLocalVariableCollectionsAsync: async () => collections.filter((c) => !c.removed),
+      getLocalVariablesAsync: async () => variables.filter((v) => !v.removed),
       createVariableCollection(name: string) {
-        return { name, defaultModeId: 'm', remove() {} };
+        const collection: Any = { id: `C:${collections.length + 1}`, name, defaultModeId: 'm' };
+        collection.remove = () => (collection.removed = true);
+        collections.push(collection);
+        return collection;
       },
-      createVariable(name: string, _collection: unknown, type: string) {
-        const variable: Any = { id: `V:${variables.length + 1}`, name, type, values: {} };
-        variable.setValueForMode = (_mode: string, value: unknown) => (variable.value = value);
+      createVariable(name: string, collection: Any, type: string) {
+        const variable: Any = {
+          id: `V:${variables.length + 1}`,
+          name,
+          type,
+          values: {},
+          valuesByMode: {},
+          variableCollectionId: collection.id,
+        };
+        variable.setValueForMode = (mode: string, value: unknown) => {
+          variable.value = value;
+          variable.valuesByMode[mode] = value;
+        };
         variable.remove = () => (variable.removed = true);
         variables.push(variable);
         return variable;
