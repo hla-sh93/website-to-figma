@@ -57,6 +57,7 @@ export async function createComponents(
     updates: [string, number[]][];
     textSizing: TextNode['textAutoResize'][];
     textWidths: number[];
+    textFills: boolean[];
   }[] = [];
   let components = 0,
     instances = 0;
@@ -128,13 +129,14 @@ export async function createComponents(
           updates,
           textSizing: oldTexts.map((t, index) => t.textAutoResize ?? sizing[index] ?? 'HEIGHT'),
           textWidths: oldTexts.map((t) => t.width),
+          textFills: oldTexts.map((t) => t.layoutSizingHorizontal === 'FILL'),
         });
         instances++;
       }
     }
     // No awaits during replacement: cancellation cannot interrupt this commit block.
     const grids = new Set<FrameNode>();
-    for (const { old, instance, updates, textSizing, textWidths } of prepared) {
+    for (const { old, instance, updates, textSizing, textWidths, textFills } of prepared) {
       const parent = old.parent;
       if (!parent || !('insertChild' in parent))
         throw new Error('A source parent was removed during component creation.');
@@ -167,9 +169,11 @@ export async function createComponents(
         const mode = textSizing[index] ?? 'HEIGHT';
         text.textAutoResize = mode;
         const width = textWidths[index];
-        // Wrapping copy keeps the width it was measured at, unless its parent sizes it.
-        if (mode !== 'WIDTH_AND_HEIGHT' && width && text.layoutSizingHorizontal === 'FIXED')
-          text.resize(width, text.height);
+        // Wrapping copy keeps how it was sized in this member: filling its parent, or
+        // the width it was measured at (the component's own copy may be a short line).
+        if (mode === 'WIDTH_AND_HEIGHT') return;
+        if (textFills[index]) text.layoutSizingHorizontal = 'FILL';
+        else if (width) text.resize(width, text.height);
       });
       for (const [key, path] of updates) {
         const node = atPath(instance, path);

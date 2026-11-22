@@ -386,10 +386,22 @@ async function capture(
               (async () => {
                 // Sections that build themselves when scrolled into view (video players,
                 // embedded widgets) get a moment to finish: until their downloads have
-                // been quiet for a second, eight seconds at most.
-                const settleBy = Date.now() + 8000;
+                // been quiet for a second, twelve seconds at most.
+                const settleBy = Date.now() + 12000;
                 for (let calm = 0; calm < 1000 && Date.now() < settleBy && !stop;) {
-                  calm = widgetDownloads.size ? 0 : calm + 200;
+                  // A sized custom element that is still empty (a player or widget whose
+                  // script has not built it yet) also counts as unfinished.
+                  const unbuilt = await page
+                    .evaluate(() =>
+                      [...document.querySelectorAll('*')].some((el) => {
+                        if (!el.tagName.includes('-') || el.childElementCount || el.shadowRoot)
+                          return false;
+                        const box = el.getBoundingClientRect();
+                        return box.width >= 40 && box.height >= 40 && !el.textContent?.trim();
+                      }),
+                    )
+                    .catch(() => false);
+                  calm = widgetDownloads.size || unbuilt ? 0 : calm + 200;
                   await page.waitForTimeout(200);
                 }
                 // Lazy images outside the viewport (carousel slides, late sections) would
