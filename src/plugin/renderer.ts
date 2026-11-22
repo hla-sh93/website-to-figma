@@ -967,9 +967,20 @@ export async function renderScene(
             else rows.push({ top: item.bounds.y, bottom: item.bounds.y + item.bounds.height });
           }
           const border = gridBorder(source);
+          // Item margins add to the CSS row gap; an even measured gap replaces it.
+          const between = rows.slice(1).map((r, i) => r.top - rows[i]!.bottom);
+          let rowGap = layout.rowGap ?? layout.gap;
+          if (
+            between.length &&
+            Math.min(...between) >= 0 &&
+            Math.max(...between) - Math.min(...between) <= 1 &&
+            Math.abs(between[0]! - rowGap) > 0.5
+          ) {
+            rowGap = between[0]!;
+            node.gridRowGap = rowGap;
+          }
           const content =
-            rows.reduce((sum, r) => sum + r.bottom - r.top, 0) +
-            (layout.rowGap ?? layout.gap) * (rows.length - 1);
+            rows.reduce((sum, r) => sum + r.bottom - r.top, 0) + rowGap * (rows.length - 1);
           const extra =
             source.bounds.height - content - padding[0] - padding[2] - border[0] - border[2];
           if (extra > 1) padding[2] += extra;
