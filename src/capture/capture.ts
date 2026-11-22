@@ -512,8 +512,30 @@ async function capture(
           let stable = await settle(24);
           if (!stable) {
             trace('freezing');
-            await page.evaluate(freezePage);
-            trace('frozen');
+            // Freeze between movements, not in the middle of one: rotating headlines and
+            // carousels hold still between transitions, so the page is sampled from
+            // inside and stopped as soon as it has held one frame (five seconds at most).
+            const held = await page
+              .evaluate(
+                `(async () => {
+                  const fingerprint = ${pageFingerprint.toString()};
+                  const freeze = ${freezePage.toString()};
+                  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+                  let previous = fingerprint(), same = 0;
+                  for (const end = Date.now() + 5000; Date.now() < end && same < 3; ) {
+                    await sleep(90);
+                    const current = fingerprint();
+                    same = current === previous ? same + 1 : 0;
+                    previous = current;
+                  }
+                  freeze();
+                  return same >= 3;
+                })()`,
+              )
+              .catch(() => undefined);
+            // The page changed under the script (navigation): freeze it the plain way.
+            if (held === undefined) await page.evaluate(freezePage);
+            trace(held ? 'frozen at a held frame' : 'frozen while moving');
             if (attempt === 0)
               local.issues.push({
                 code: 'motion-frozen',
