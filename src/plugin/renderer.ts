@@ -1192,6 +1192,48 @@ export async function renderScene(
           Math.abs(source.bounds.width - inner) <= 3
         )
           native.layoutSizingHorizontal = 'FILL';
+        // Authored intent in a row, applied only where it leaves the captured picture
+        // unchanged. A resized design then behaves as the page would.
+        if (mode === 'horizontal' && native.type !== 'TEXT' && !huggers.has(source.id)) {
+          const flow = parentSource.children.filter((c) => c.position !== 'absolute');
+          const innerHeight =
+            parentSource.bounds.height -
+            parentLayout.padding[0] -
+            parentLayout.padding[2] -
+            edge[0] -
+            edge[2];
+          const used =
+            flow.reduce((sum, c) => sum + c.bounds.width, 0) + parentLayout.gap * (flow.length - 1);
+          const growers = flow.filter((c) => c.layout?.grow);
+          // Free space goes to the growing items in equal shares in Figma, so they
+          // must be the only one, or measured equal, and the row must be exactly full.
+          if (
+            source.layout?.grow &&
+            !huggers.has(parentSource.id) &&
+            Math.abs(used - inner) <= 2 &&
+            parentLayout.justify !== 'space-between' &&
+            growers.every((c) => Math.abs(c.bounds.width - source.bounds.width) <= 1)
+          ) {
+            try {
+              native.layoutSizingHorizontal = 'FILL';
+            } catch {}
+          }
+          // Stretched to the row's height, which another item sets.
+          if (
+            source.layout?.stretch &&
+            Math.abs(source.bounds.height - innerHeight) <= 1.5 &&
+            flow.some(
+              (c) =>
+                c !== source &&
+                !c.layout?.stretch &&
+                Math.abs(c.bounds.height - innerHeight) <= 1.5,
+            )
+          ) {
+            try {
+              native.layoutSizingVertical = 'FILL';
+            } catch {}
+          }
+        }
       }
     }
     if (source.style.rotation && source.style.size && parentSource) {

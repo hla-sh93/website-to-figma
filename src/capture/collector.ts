@@ -817,6 +817,35 @@ export function collect(selector: string | undefined): {
     }
     return node;
   };
+  // What the author asked for, beyond what was measured: an item that takes its
+  // row's free space, or one stretched to its container's cross size. The picture is
+  // the same at the captured width; the difference shows when the design is resized.
+  const authoredIntent = (el: Element, c: CSSStyleDeclaration, r: DOMRect) => {
+    const parent = el.parentElement ? getComputedStyle(el.parentElement) : undefined;
+    if (!parent || c.position === 'absolute' || c.position === 'fixed') return {};
+    const row = /flex/.test(parent.display) && parent.flexDirection.startsWith('row');
+    const grow = row && parseFloat(c.flexGrow) > 0;
+    const html = el as HTMLElement;
+    const stretches =
+      row &&
+      el.parentElement!.childElementCount > 1 &&
+      !!html.style &&
+      (c.alignSelf === 'auto' || c.alignSelf === 'normal'
+        ? parent.alignItems === 'normal' || parent.alignItems === 'stretch'
+        : c.alignSelf === 'stretch');
+    // Whether the height is authored cannot be read from computed styles, so ask the
+    // layout: without the stretch, an item with no height of its own becomes shorter.
+    let stretch = false;
+    if (stretches) {
+      const had = el.hasAttribute('style'),
+        before = html.style.alignSelf;
+      html.style.alignSelf = 'flex-start';
+      stretch = el.getBoundingClientRect().height < r.height - 1;
+      html.style.alignSelf = before;
+      if (!had) el.removeAttribute('style');
+    }
+    return { ...(grow ? { grow: true } : {}), ...(stretch ? { stretch: true } : {}) };
+  };
   // Boxes whose width comes from their content in CSS (inline boxes, floats,
   // non-growing items of a flex row) become hugging frames in Figma.
   const shrinkWrapped = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
@@ -1604,6 +1633,7 @@ export function collect(selector: string | undefined): {
         !stretchedHeight(el, c, r, n)
           ? 'hug'
           : 'fixed',
+      ...authoredIntent(el, c, r),
       ...(grid ? { columns: c.gridTemplateColumns.split(' ').filter(Boolean).length } : {}),
       ...(grid && /^(?:[\d.]+px\s*)+$/.test(c.gridTemplateColumns)
         ? { tracks: c.gridTemplateColumns.split(' ').filter(Boolean).map(px) }

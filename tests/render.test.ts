@@ -772,3 +772,40 @@ test('grid rows use the measured gap when item margins add to the CSS gap', asyn
   );
   assert.equal(byId('grid').gridRowGap, 8);
 });
+
+test('authored grow and stretch become fill only where the picture stays the same', async () => {
+  const cell = (id: string, x: number, width: number, height: number, extra = {}) =>
+    node(id, { position: 'flow', bounds: { x, y: 0, width, height }, ...extra });
+  const { byId } = await render(
+    scene([
+      node('bar', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 600, height: 80 },
+        layout: flowLayout('horizontal'),
+        children: [
+          cell('logo', 0, 120, 80),
+          cell('search', 120, 380, 80, { layout: { ...flowLayout('vertical'), grow: true } }),
+          cell('side', 500, 100, 80, { layout: { ...flowLayout('vertical'), stretch: true } }),
+        ],
+      }),
+      // The row is not full: free space would move the growing item.
+      node('loose', {
+        position: 'flow',
+        bounds: { x: 0, y: 100, width: 600, height: 80 },
+        layout: flowLayout('horizontal'),
+        children: [
+          node('short', {
+            position: 'flow',
+            bounds: { x: 0, y: 100, width: 200, height: 80 },
+            layout: { ...flowLayout('vertical'), grow: true },
+          }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('search').layoutSizingHorizontal, 'FILL');
+  assert.equal(byId('search').width, 380);
+  assert.equal(byId('side').layoutSizingVertical, 'FILL');
+  assert.notEqual(byId('logo').layoutSizingHorizontal, 'FILL');
+  assert.notEqual(byId('short').layoutSizingHorizontal, 'FILL');
+});

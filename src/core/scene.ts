@@ -24,6 +24,10 @@ export type Layout = {
   columns?: number;
   /** Measured grid column widths in pixels, one per column. */
   tracks?: number[];
+  /** Authored intent: this flex item takes the free space of its row (flex-grow). */
+  grow?: boolean;
+  /** Authored intent: this item is stretched to its container's cross size. */
+  stretch?: boolean;
   widthSizing: 'fixed' | 'fill' | 'hug';
   heightSizing: 'fixed' | 'fill' | 'hug';
   minWidth?: number;
@@ -452,6 +456,8 @@ export function validateScene(input: unknown): ScenePackage {
           },
           q,
         );
+        optional(l, 'grow', bool, q);
+        optional(l, 'stretch', bool, q);
         for (const k of ['widthSizing', 'heightSizing'])
           en(l[k], q + '.' + k, ['fixed', 'fill', 'hug']);
         for (const k of ['minWidth', 'maxWidth']) optional(l, k, (x, y) => num(x, y, 0), q);
