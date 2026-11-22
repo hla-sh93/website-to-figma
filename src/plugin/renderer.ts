@@ -120,6 +120,17 @@ export function deriveLayout(node: SceneNode): Layout {
     )
   )
     layout.wrap = false;
+  // A wrapping column (flex-direction: column with wrap) has no auto-layout
+  // counterpart: one measured column is a plain column, several keep their positions.
+  if (layout.wrap && layout.mode === 'vertical' && children.length) {
+    const oneColumn = children.every(
+      (c) =>
+        c.bounds.x < children[0]!.bounds.x + children[0]!.bounds.width &&
+        children[0]!.bounds.x < c.bounds.x + c.bounds.width,
+    );
+    if (!oneColumn) return { ...layout, mode: 'none' };
+    layout.wrap = false;
+  }
   // CSS reaches the same picture in many ways (auto margins, align-self, baselines,
   // transforms). Auto layout is kept only where it reproduces the measured positions:
   // alignment and edge padding are taken from the measurement, and a container whose
