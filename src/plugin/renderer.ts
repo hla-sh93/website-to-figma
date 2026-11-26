@@ -1254,6 +1254,7 @@ export async function renderScene(
           });
       }
       const paintRanks = new Map<string, number>();
+      const builtAbsolute = new Set<string>();
       const builtChildren = new Map<string, Awaited<ReturnType<typeof buildNative>>>();
       let previous: SceneNode | undefined;
       for (const child of source.children) {
@@ -1282,7 +1283,8 @@ export async function renderScene(
         const built = await buildNative(child, node, source, screenId);
         builtChildren.set(child.id, built);
         paintRanks.set(built.id, paintRank(child));
-        if (child.position !== 'absolute') previous = child;
+        if (child.position === 'absolute') builtAbsolute.add(built.id);
+        else previous = child;
       }
       const painted = [...node.children].sort(
         (a, b) => (paintRanks.get(a.id) ?? 0) - (paintRanks.get(b.id) ?? 0),
@@ -1299,8 +1301,20 @@ export async function renderScene(
           .map((n) => n.id)
           .join();
       const keepsFlow = layout.mode === 'none' || flowOrder(painted) === flowOrder(node.children);
-      if (keepsFlow && painted.some((child, index) => child.id !== node.children[index]?.id))
-        for (const child of painted) node.appendChild(child);
+      // When paint order and flow order disagree among the flowing children (some have a
+      // z-index, some do not), the flow keeps its order, and positioned layers still go
+      // where they paint: under everything when their rank is negative, on top otherwise.
+      // A fixed header then stays above the sections it floats over.
+      const rank = (child: BaseNode) => paintRanks.get(child.id) ?? 0;
+      const stacked = keepsFlow
+        ? painted
+        : [
+            ...painted.filter((child) => builtAbsolute.has(child.id) && rank(child) < 0),
+            ...node.children.filter((child) => !builtAbsolute.has(child.id)),
+            ...painted.filter((child) => builtAbsolute.has(child.id) && rank(child) >= 0),
+          ];
+      if (stacked.some((child, index) => child.id !== node.children[index]?.id))
+        for (const child of stacked) node.appendChild(child);
       if (layout.mode === 'grid') placeGridCells(node, source, screenId);
       if (
         layout.mode !== 'none' &&

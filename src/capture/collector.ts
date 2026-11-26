@@ -1477,8 +1477,8 @@ export function collect(selector: string | undefined): {
             }
           if (
             node !== el &&
-            !marked &&
-            (paint.a > 0 ||
+            // A plain background or underline is drawn as a mark; the rest is still lost.
+            ((paint.a > 0 && !marked) ||
               inline.backgroundImage !== 'none' ||
               Number(inline.opacity) !== 1 ||
               px(inline.borderTopWidth) ||

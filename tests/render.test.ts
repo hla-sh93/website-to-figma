@@ -960,3 +960,38 @@ test('a short grid item centred beside a tall one stays in its row', async () =>
   assert.equal(byId('copy').gridChildVerticalAlign, 'CENTER');
   assert.equal(byId('photos').gridChildVerticalAlign, 'MIN');
 });
+
+test('a fixed header stays above the sections even when their paint order differs from the flow', async () => {
+  const { byId } = await render(
+    scene([
+      node('page', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1440, height: 800 },
+        layout: flowLayout('vertical'),
+        children: [
+          node('header', {
+            position: 'absolute',
+            bounds: { x: 0, y: 16, width: 1440, height: 70 },
+            style: { opacity: 1, zIndex: 999 },
+          }),
+          node('under', {
+            position: 'absolute',
+            bounds: { x: 0, y: 0, width: 1440, height: 100 },
+            style: { opacity: 1, zIndex: -1 },
+          }),
+          // The second section has z-index 0, the first and third none: sorting by
+          // paint rank would move it after the third.
+          node('one', { position: 'flow', bounds: { x: 0, y: 0, width: 1440, height: 300 } }),
+          node('two', {
+            position: 'flow',
+            bounds: { x: 0, y: 300, width: 1440, height: 300 },
+            style: { opacity: 1, zIndex: 0 },
+          }),
+          node('three', { position: 'flow', bounds: { x: 0, y: 600, width: 1440, height: 200 } }),
+        ],
+      }),
+    ]),
+  );
+  const order = byId('page').children.map((child: { name: string }) => child.name);
+  assert.deepEqual(order, ['under', 'one', 'two', 'three', 'header']);
+});
