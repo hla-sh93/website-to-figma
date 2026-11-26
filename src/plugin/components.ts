@@ -27,6 +27,24 @@ function nativeTexts(root: SceneNode): TextNode[] {
   ];
 }
 
+/**
+ * An instance takes the size of every inner box from its component, and a box inside an
+ * instance cannot be given another size. Members whose inner boxes have fixed sizes that
+ * differ (a card whose copy runs to one more line) cannot be instances of one component
+ * without one of them changing.
+ */
+function sameInnerBoxes(a: SceneNode, b: SceneNode, root = true): boolean {
+  if (a.type === 'TEXT' || b.type === 'TEXT') return true;
+  if (!root && 'layoutSizingHorizontal' in a && 'layoutSizingHorizontal' in b) {
+    if (a.layoutSizingHorizontal === 'FIXED' && Math.abs(a.width - b.width) > 0.5) return false;
+    if (a.layoutSizingVertical === 'FIXED' && Math.abs(a.height - b.height) > 0.5) return false;
+  }
+  if (!('children' in a) || !('children' in b)) return true;
+  for (let i = 0; i < Math.min(a.children.length, b.children.length); i++)
+    if (!sameInnerBoxes(a.children[i]!, b.children[i]!, false)) return false;
+  return true;
+}
+
 /** Clones and prepares all instances before replacing original screen content. */
 export async function createComponents(
   api: PluginAPI,
@@ -78,6 +96,17 @@ export async function createComponents(
         ancestor = ancestor.parent;
       }
       if (insideInstance) continue;
+      // Every member must be drawable as an instance without changing its picture.
+      let uniform = true;
+      for (const member of candidate.members.slice(1)) {
+        const otherId = result.mapping[`${screen.id}:${member.sourceId}`];
+        const other = otherId ? await api.getNodeByIdAsync(otherId) : null;
+        if (other && other.type === 'FRAME' && !sameInnerBoxes(first, other)) {
+          uniform = false;
+          break;
+        }
+      }
+      if (!uniform) continue;
       const originalTextSizing = nativeTexts(first).map((text) => text.textAutoResize);
       const clone = first.clone();
       library.appendChild(clone);
