@@ -690,6 +690,16 @@ export async function renderScene(
   const oneLineTexts: { node: TextNode; lineHeight: number; width: number }[] = [];
   // Copy that kept the browser's line breaks under a substituted font.
   const keptBreaks = new Set<string>();
+  // Copy on several lines whose line count is checked once the screen is built.
+  const wrapChecks: {
+    node: TextNode;
+    height: number;
+    lineHeight: number;
+    size: number;
+    spacing: number;
+    breaks: number[];
+    shift: number;
+  }[] = [];
   const brokenTexts: {
     node: TextNode;
     height: number;
@@ -769,6 +779,25 @@ export async function renderScene(
       // A substitute wider than the page's font pushes a kept line past its box, where
       // it wraps again. Slightly tighter letter spacing (at most 4% of the size) brings
       // the lines back; the text then leaves its shared style.
+      // A font with the page's name can still have other widths (a site serves its own
+      // cut of a family the editor also has), and the copy then breaks on another number
+      // of lines. Where the drawn height shows that, the browser's breaks are put in.
+      for (const t of wrapChecks.filter(
+        (t) => Math.abs(t.node.height - t.height) > t.lineHeight / 2,
+      )) {
+        const text = t.node.characters;
+        let changed = false;
+        // From the end, so earlier offsets stay valid; a space becomes a separator.
+        for (const offset of [...t.breaks].sort((a, b) => b - a)) {
+          const at = offset + t.shift - 1;
+          if (text[at] !== ' ') continue;
+          t.node.insertCharacters(at + 1, '\u2028', 'BEFORE');
+          t.node.deleteCharacters(at, at + 1);
+          changed = true;
+        }
+        if (changed) brokenTexts.push(t);
+      }
+      wrapChecks.length = 0;
       for (const t of brokenTexts.filter((t) => t.node.height > t.height + t.lineHeight / 2)) {
         let fits = false;
         for (let step = 1; step <= 4 && !fits; step++) {
@@ -1547,6 +1576,21 @@ export async function renderScene(
             node: native,
             lineHeight: source.text!.lineHeight,
             width: source.bounds.width,
+          });
+        if (
+          !keptBreaks.has(source.id) &&
+          native.textAutoResize === 'HEIGHT' &&
+          source.text!.breaks?.length &&
+          !source.text!.maxLines
+        )
+          wrapChecks.push({
+            node: native,
+            height: source.bounds.height,
+            lineHeight: source.text!.lineHeight,
+            size: source.text!.fontSize,
+            spacing: source.text!.letterSpacing,
+            breaks: source.text!.breaks,
+            shift: rtlMark(source.text!).length,
           });
         if (keptBreaks.has(source.id) && native.textAutoResize === 'HEIGHT')
           brokenTexts.push({

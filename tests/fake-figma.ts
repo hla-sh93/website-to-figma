@@ -107,6 +107,14 @@ for (const method of [
     this.ranges.push({ method, start, end, value });
   };
 
+// Text edits that keep range styles in Figma; here they only edit the string.
+(FakeNode.prototype as Any).insertCharacters = function (this: Any, start: number, text: string) {
+  this.characters = this.characters.slice(0, start) + text + this.characters.slice(start);
+};
+(FakeNode.prototype as Any).deleteCharacters = function (this: Any, start: number, end: number) {
+  this.characters = this.characters.slice(0, start) + this.characters.slice(end);
+};
+
 export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }]) {
   const page = new FakeNode('PAGE');
   const variables: Any[] = [];

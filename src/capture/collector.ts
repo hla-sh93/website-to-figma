@@ -931,6 +931,30 @@ export function collect(selector: string | undefined): {
   };
   // Boxes sized by their container (absolute insets, stretched flex/grid items,
   // min-height) are taller than their content; hugging would collapse them.
+  // The height the author wrote, read from the style rules rather than guessed from the
+  // picture: a height or an aspect ratio makes the box that size whatever is inside it.
+  // Its content says nothing then (children spread with space-between always fill it).
+  const authoredHeight = (el: Element, c: CSSStyleDeclaration): boolean => {
+    if (c.aspectRatio && c.aspectRatio !== 'auto') return true;
+    // A column that spreads its children (space-between) is taller than they need by
+    // design: something outside gave it that height, and hugging would close the gaps.
+    if (
+      /flex/.test(c.display) &&
+      c.flexDirection.startsWith('column') &&
+      /^space-/.test(c.justifyContent) &&
+      el.children.length > 1
+    )
+      return true;
+    const height = (
+      el as Element & {
+        computedStyleMap?: () => { get(name: string): { toString(): string } | undefined };
+      }
+    )
+      .computedStyleMap?.()
+      .get('height')
+      ?.toString();
+    return !!height && height !== 'auto';
+  };
   const stretchedHeight = (el: Element, c: CSSStyleDeclaration, r: DOMRect, n: SceneNode) => {
     const flow = n.children.filter(
       (child) => child.position !== 'absolute' && child.source.tag !== '#background',
@@ -1746,6 +1770,7 @@ export function collect(selector: string | undefined): {
         !(el as HTMLElement).style.height &&
         c.display !== 'inline' &&
         n.children.length > 0 &&
+        !authoredHeight(el, c) &&
         !stretchedHeight(el, c, r, n)
           ? 'hug'
           : 'fixed',

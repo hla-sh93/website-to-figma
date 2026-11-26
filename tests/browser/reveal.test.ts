@@ -93,3 +93,37 @@ test('a highlighted phrase and a border underline inside copy become boxes behin
   assert.equal(title.children.at(-1)!.kind, 'text');
   assert.ok(highlights.every((h) => h.position === 'absolute'));
 });
+
+test('a box keeps the height its style rules give it, whatever fills it', async () => {
+  const page = `<!doctype html><html><head><style>
+  body{margin:0;font:16px/20px Arial}
+  .item{width:400px;aspect-ratio:1/1}
+  .card{height:100%;box-sizing:border-box;padding:32px;display:flex;flex-direction:column;justify-content:space-between;background:rgb(124,76,219)}
+  .fixed{height:120px;display:flex;flex-direction:column;justify-content:space-between}
+  .free{display:flex;flex-direction:column}
+  </style></head><body>
+  <div class="item" id="item"><div class="card" id="card"><div id="badge">01</div><div id="copy">Proven Clients</div></div></div>
+  <div class="fixed" id="fixed"><span>a</span><span>b</span></div>
+  <div class="free" id="free"><span>a</span><span>b</span></div>
+  </body></html>`;
+  const all = flatten((await captureHtml(page, { widths: [800] })).screens[0]!.root);
+  const key = (k: string) => all.find((n) => n.source.key === k)!;
+  assert.equal(key('item').bounds.height, 400);
+  assert.equal(key('item').layout!.heightSizing, 'fixed');
+  assert.equal(key('card').layout!.heightSizing, 'fixed');
+  assert.equal(key('fixed').layout!.heightSizing, 'fixed');
+  // No rule gives this one a height: it is as tall as its content.
+  assert.equal(key('free').layout!.heightSizing, 'hug');
+});
+
+test('a stretched column that spreads its children keeps its height', async () => {
+  const page = `<!doctype html><html><head><style>
+  body{margin:0;font:16px/20px Arial}
+  .item{width:400px;height:400px;display:flex}
+  .card{flex:1;display:flex;flex-direction:column;justify-content:space-between;padding:32px}
+  </style></head><body><div class="item" id="item"><div class="card" id="card"><div>01</div><div>Proven Clients</div></div></div></body></html>`;
+  const all = flatten((await captureHtml(page, { widths: [800] })).screens[0]!.root);
+  const card = all.find((n) => n.source.key === 'card')!;
+  assert.equal(card.bounds.height, 400);
+  assert.equal(card.layout!.heightSizing, 'fixed');
+});

@@ -995,3 +995,33 @@ test('a fixed header stays above the sections even when their paint order differ
   const order = byId('page').children.map((child: { name: string }) => child.name);
   assert.deepEqual(order, ['under', 'one', 'two', 'three', 'header']);
 });
+
+test('copy drawn on another number of lines than the browser gets the browser breaks', async () => {
+  const figma = createFakeFigma();
+  // The editor's cut of the font is narrower: three browser lines come out as two.
+  const createText = figma.api.createText.bind(figma.api);
+  figma.api.createText = () => {
+    const node = createText();
+    Object.defineProperty(node, 'height', { get: () => 40, set: () => {} });
+    return node;
+  };
+  const copy = (id: string, height: number) =>
+    node(id, {
+      kind: 'text',
+      position: 'flow',
+      bounds: { x: 0, y: 0, width: 120, height },
+      text: text('one two three four five six', {
+        sizing: 'block',
+        lines: height / 20,
+        breaks: height === 60 ? [8, 19] : [14],
+      }),
+    });
+  const result = await renderScene(figma.api, scene([copy('short', 60), copy('same', 40)]), {
+    components: false,
+  });
+  const byId = (id: string) =>
+    figma.all.find((n) => n.id === result.mapping[`viewport-1440:${id}`])!;
+  assert.equal(byId('short').characters, 'one two\u2028three four\u2028five six');
+  // Drawn on the lines the browser had: left as running copy.
+  assert.equal(byId('same').characters, 'one two three four five six');
+});
