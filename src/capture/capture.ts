@@ -24,6 +24,13 @@ import { nameLayers } from '../core/naming.js';
 import { textLineBoxes } from '../core/text-box.js';
 import { inspectFonts } from './fonts.js';
 import { captureGate, freezePage, pageFingerprint } from './page-state.js';
+import {
+  assignSiteFonts,
+  parseFontFaces,
+  saveSiteFonts,
+  MAX_FONT_BYTES,
+  MAX_FONT_FILES,
+} from './site-fonts.js';
 import { normalizeImage, isTiledScreenshot, MAX_ASSET_BYTES } from './images.js';
 import { parseObjectPosition, backgroundSize, computeImagePlacement } from '../core/image.js';
 export type CaptureOptions = {
@@ -34,6 +41,8 @@ export type CaptureOptions = {
   signal?: AbortSignal;
   onProgress?: (stage: string) => void;
   selector?: string;
+  /** Folder to save the page's web fonts in, as installable files. */
+  fontsDir?: string;
 };
 const MAX_REQUESTS = 3000;
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
@@ -224,6 +233,10 @@ async function capture(
       assets: [],
       issues: [],
     };
+    // Font files the page loaded, by address (one copy for all widths).
+    const fontDownloads = new Map<string, Uint8Array | undefined>();
+    // Style sheet text by address: its @font-face rules name the fonts.
+    const styleSheets = new Map<string, string>();
     // The address that answered; a later width starts from it.
     let target = input.url ?? '';
     const captureWidth = async (width: number) => {
@@ -240,6 +253,37 @@ async function capture(
       // Scripts, data and media in flight: late widgets (players, carousels) build
       // themselves from these after they scroll into view.
       const widgetDownloads = new Set<import('playwright').Request>();
+      if (o.fontsDir)
+        page.on('response', (response) => {
+          const url = response.url();
+          if (
+            response.request().resourceType() === 'stylesheet' &&
+            response.ok() &&
+            !styleSheets.has(url) &&
+            styleSheets.size < 60
+          ) {
+            styleSheets.set(url, '');
+            void response
+              .text()
+              .then((css) => styleSheets.set(url, css))
+              .catch(() => {});
+            return;
+          }
+          if (
+            response.request().resourceType() !== 'font' ||
+            !response.ok() ||
+            fontDownloads.has(url) ||
+            fontDownloads.size >= MAX_FONT_FILES * 2
+          )
+            return;
+          fontDownloads.set(url, undefined);
+          void response
+            .body()
+            .then((body) => {
+              if (body.length <= MAX_FONT_BYTES) fontDownloads.set(url, body);
+            })
+            .catch(() => {});
+        });
       page.on('request', (request) => {
         const type = request.resourceType();
         if (type === 'image') imageDownloads.add(request);
@@ -1117,6 +1161,24 @@ async function capture(
         }
       result.issues.push(...part.issues);
       result.screens.push(...part.screens);
+    }
+    if (o.fontsDir && input.url) {
+      const saved = await saveSiteFonts(
+        o.fontsDir,
+        new URL(target || input.url).hostname,
+        [...fontDownloads].filter((entry): entry is [string, Uint8Array] => entry[1] !== undefined),
+      ).catch(() => undefined);
+      if (saved) {
+        result.siteFonts = {
+          folder: saved.folder,
+          files: saved.files.map(({ family, style, file }) => ({ family, style, file })),
+        };
+        assignSiteFonts(
+          result.screens.map((screen) => screen.root),
+          [...styleSheets].flatMap(([url, css]) => parseFontFaces(css, url)),
+          saved.byUrl,
+        );
+      }
     }
     if (requestLimited)
       result.issues.push({

@@ -171,6 +171,16 @@
       #font-note p {
         margin: 0 0 10px;
         color: var(--text);
+        white-space: pre-line;
+      }
+      #font-folder {
+        display: block;
+        margin: 0 0 10px;
+        font-size: 11px;
+        word-break: break-all;
+        user-select: all;
+        text-align: left;
+        color: var(--muted);
       }
       details {
         margin-top: 12px;
@@ -252,6 +262,7 @@
       <progress id="progress" aria-label="تقدم النسخ" hidden></progress>
       <div id="font-note" hidden>
         <p id="font-message"></p>
+        <code id="font-folder" dir="ltr" hidden></code>
         <button id="allow-fonts" class="secondary">متابعة بخط بديل</button>
       </div>
       <button id="cancel" hidden>إلغاء</button>

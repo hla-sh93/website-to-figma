@@ -419,13 +419,14 @@ export async function preflightFonts(
       }
     }
   const resolutions = new Map<string, FontResolution>();
-  const missing: { requested: string; replacement: FontFace }[] = [];
+  const missing: { requested: string; family: string; replacement: FontFace }[] = [];
   for (const [key, spec] of requests) {
     const resolved = resolveFont(spec, available, fallback, axesByFamily);
     resolutions.set(key, resolved);
     if (!resolved.exact)
       missing.push({
         requested: `${fontLabel(spec)} ${spec.fontWeight} ${spec.fontStyle}`,
+        family: fontLabel(spec),
         replacement: resolved.font,
       });
   }

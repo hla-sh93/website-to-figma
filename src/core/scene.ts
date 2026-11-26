@@ -63,6 +63,7 @@ export type TextRun = {
   fontSize?: number;
   color?: RGBA;
   resolvedFontFamily?: string;
+  resolvedFontStyle?: string;
   variationSettings?: Record<string, number>;
   textDecoration?: TextDecoration;
   letterSpacing?: number;
@@ -86,6 +87,8 @@ export type TextSpec = {
   /** Offsets in `characters` where the browser started each line after the first. */
   breaks?: number[];
   resolvedFontFamily?: string;
+  /** The style name of the installed face that drew the text, when its file is known. */
+  resolvedFontStyle?: string;
   fontUsage?: FontUsage[];
   variationSettings?: Record<string, number>;
   textDecoration?: TextDecoration;
@@ -166,6 +169,8 @@ export type ScenePackage = {
   screens: SceneScreen[];
   assets: SceneAsset[];
   issues: SceneIssue[];
+  /** The page's web fonts, saved on this computer as installable files. */
+  siteFonts?: { folder: string; files: { family: string; style: string; file: string }[] };
   /** Design tokens the page declares as CSS custom properties. */
   tokens?: { colors: ColorToken[] };
 };
@@ -289,6 +294,7 @@ export function validateScene(input: unknown): ScenePackage {
   const screens = new Map<string, Set<string>>();
   const fontProperties = (o: Obj, p: string) => {
     optional(o, 'resolvedFontFamily', str, p);
+    optional(o, 'resolvedFontStyle', str, p);
     optional(o, 'textDecoration', (v, q) => en(v, q, ['none', 'underline', 'strikethrough']), p);
     optional(o, 'textCase', (v, q) => en(v, q, ['upper', 'lower', 'title']), p);
     optional(
@@ -549,6 +555,24 @@ export function validateScene(input: unknown): ScenePackage {
     );
     node(screen.root, p + '.root', ids, 1);
   }
+  optional(
+    s,
+    'siteFonts',
+    (v, p) => {
+      const fonts = obj(v, p);
+      str(fonts.folder, p + '.folder');
+      if (fonts.folder.length > 400) fail(p + '.folder is too long');
+      for (const [i, f] of arr(fonts.files, p + '.files', 60).entries()) {
+        const q = `${p}.files[${i}]`,
+          file = obj(f, q);
+        for (const k of ['family', 'style', 'file']) {
+          str(file[k], q + '.' + k);
+          if (!file[k] || file[k].length > 120) fail(q + '.' + k + ' must be 1 to 120 characters');
+        }
+      }
+    },
+    'scene',
+  );
   optional(
     s,
     'tokens',

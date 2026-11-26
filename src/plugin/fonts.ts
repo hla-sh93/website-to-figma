@@ -7,7 +7,12 @@ export type FontFace = {
 export type FontResolution = { font: FontFace; exact: boolean };
 export type FontRequest = Pick<
   TextSpec,
-  'fontFamily' | 'fontStyle' | 'fontWeight' | 'resolvedFontFamily' | 'variationSettings'
+  | 'fontFamily'
+  | 'fontStyle'
+  | 'fontWeight'
+  | 'resolvedFontFamily'
+  | 'resolvedFontStyle'
+  | 'variationSettings'
 >;
 export const normalizeFamily = (s: string) => s.toLowerCase().replace(/[\s_-]/g, '');
 export function splitFontFamilies(value: string): string[] {
@@ -36,6 +41,7 @@ export const fontKey = (spec: FontRequest) =>
     spec.fontWeight,
     spec.resolvedFontFamily ?? null,
     spec.variationSettings ?? null,
+    spec.resolvedFontStyle ?? null,
   ]);
 export function fontRequest(text: TextSpec, run?: TextRun): FontRequest {
   const result: FontRequest = {
@@ -45,6 +51,12 @@ export function fontRequest(text: TextSpec, run?: TextRun): FontRequest {
   };
   const sameFamily = !run?.fontFamily || run.fontFamily === text.fontFamily;
   const resolved = run?.resolvedFontFamily ?? (sameFamily ? text.resolvedFontFamily : undefined);
+  const face = run?.resolvedFontFamily
+    ? run.resolvedFontStyle
+    : sameFamily && !run?.fontWeight && !run?.fontStyle
+      ? text.resolvedFontStyle
+      : undefined;
+  if (resolved && face) result.resolvedFontStyle = face;
   const axes = run?.variationSettings ?? (sameFamily ? text.variationSettings : undefined);
   if (resolved) result.resolvedFontFamily = resolved;
   if (axes) result.variationSettings = axes;
@@ -68,8 +80,12 @@ export function resolveFont(
   fallback = 'Inter',
   axesByFamily: Record<string, string[] | null> = {},
 ): FontResolution {
+  // A font matched to its saved file is known by the file's own name; a copy already
+  // in the editor under the name the page uses (a Google font) is the same font.
+  const fromFile = !!(spec.resolvedFontFamily && spec.resolvedFontStyle);
+  const first = splitFontFamilies(spec.fontFamily)[0];
   const families = spec.resolvedFontFamily
-    ? [spec.resolvedFontFamily]
+    ? [spec.resolvedFontFamily, ...(fromFile && first ? [first] : [])]
     : splitFontFamilies(spec.fontFamily);
   let chosenIndex = -1,
     candidates: FontFace[] = [];
@@ -88,6 +104,15 @@ export function resolveFont(
     throw new Error(
       `No usable editor font for ${fontLabel(spec)}. Enable the font or choose an available fallback.`,
     );
+  // The capture knows which file drew the text: that face, by its own style name
+  // ("Book", "Roman"), is exact whatever weight the page called it.
+  const named =
+    chosenIndex === 0 && spec.resolvedFontStyle
+      ? candidates.find(
+          (f) => normalizeFamily(f.style) === normalizeFamily(spec.resolvedFontStyle!),
+        )
+      : undefined;
+  if (named) return { font: { family: named.family, style: named.style }, exact: true };
   const italic = /italic|oblique/i.test(spec.fontStyle),
     desiredWeight = spec.variationSettings?.wght ?? spec.fontWeight;
   const score = (f: FontFace) =>
@@ -113,7 +138,7 @@ export function resolveFont(
   return {
     font,
     exact:
-      chosenIndex === 0 &&
+      (chosenIndex === 0 || (fromFile && chosenIndex === 1)) &&
       (axes.includes('wght') || weight(face.style) === desiredWeight) &&
       /italic|oblique/i.test(face.style) === italic &&
       supportedAxes,
@@ -159,6 +184,8 @@ export function validateFontRequests(input: unknown): FontRequest[] {
       fontWeight: r.fontWeight,
     };
     if (typeof r.resolvedFontFamily === 'string') result.resolvedFontFamily = r.resolvedFontFamily;
+    if (typeof r.resolvedFontStyle === 'string' && r.resolvedFontStyle.length <= 120)
+      result.resolvedFontStyle = r.resolvedFontStyle;
     if (r.variationSettings && typeof r.variationSettings === 'object') {
       const axes: Record<string, number> = {};
       for (const [tag, value] of Object.entries(r.variationSettings).slice(0, 16))

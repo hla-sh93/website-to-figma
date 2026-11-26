@@ -374,8 +374,28 @@ window.onmessage = async (event: MessageEvent) => {
       report('missing-fonts', { count: data.missing.length });
       $('font-note').hidden = false;
       $('progress').hidden = true;
-      $('font-message').textContent =
-        'خط الموقع غير متوفر في Figma. ثبّتيه للحفاظ على النص، أو اختاري المتابعة بخط بديل.';
+      // Which fonts are missing, and whether the site's own files were saved for them.
+      const same = (x: string, y: string) =>
+        x.toLowerCase().replace(/[\s_-]/g, '') === y.toLowerCase().replace(/[\s_-]/g, '');
+      const families = [
+        ...new Set(
+          (data.missing as { family?: string; requested: string }[]).map(
+            (font) => font.family ?? font.requested,
+          ),
+        ),
+      ].slice(0, 8);
+      const saved = scene?.siteFonts;
+      const hasFiles =
+        !!saved && families.some((family) => saved.files.some((file) => same(file.family, family)));
+      $('font-message').textContent = [
+        'خطوط غير متوفرة في Figma: ' + families.join('، ') + '.',
+        hasFiles
+          ? 'حُفظت ملفات هذه الخطوط من الموقع في المجلد أدناه. ثبّتيها إن كان لديك حق استخدامها، ثم أعيدي تشغيل Figma وأعيدي النسخ.'
+          : 'ثبّتيها للحصول على تطابق كامل.',
+        'أو تابعي بخط بديل: تبقى الأسطر كما كسرها المتصفح، ويختلف شكل الحروف فقط.',
+      ].join('\n');
+      $('font-folder').textContent = hasFiles ? saved.folder : '';
+      $('font-folder').hidden = !hasFiles;
       status('بانتظار الخط المطلوب.');
     } else insert();
     return;
