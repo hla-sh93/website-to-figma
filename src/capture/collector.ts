@@ -576,13 +576,27 @@ export function collect(selector: string | undefined): {
     };
   };
   // Lines as laid out by the browser: client rects that start a new row.
+  // A range that holds a whole inline-block reports that box as one rectangle, however
+  // many lines it has inside, so the rectangles are read from the text nodes themselves.
   const lineCount = (range: Range): number => {
+    const root = range.commonAncestorContainer;
+    const nodes: Node[] = [];
+    if (root.nodeType === Node.TEXT_NODE) nodes.push(root);
+    else {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode())
+        if (range.intersectsNode(walker.currentNode)) nodes.push(walker.currentNode);
+    }
+    const own = document.createRange();
     let lines = 0,
       bottom = -Infinity;
-    for (const rect of range.getClientRects()) {
-      if (!rect.width || !rect.height) continue;
-      if (rect.top >= bottom - rect.height / 2) lines++;
-      bottom = Math.max(bottom, rect.bottom);
+    for (const node of nodes) {
+      own.selectNodeContents(node);
+      for (const rect of own.getClientRects()) {
+        if (!rect.width || !rect.height) continue;
+        if (rect.top >= bottom - rect.height / 2) lines++;
+        bottom = Math.max(bottom, rect.bottom);
+      }
     }
     return Math.max(1, lines);
   };

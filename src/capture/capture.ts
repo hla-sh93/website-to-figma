@@ -366,7 +366,10 @@ async function capture(
         const steadyStyles = () =>
           page.addStyleTag({
             content:
-              '*,*::before,*::after{transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}',
+              '*,*::before,*::after{transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' +
+              // A section pinned while the visitor scrolls sits in a spacer as tall as the
+              // scroll it consumes; in a still picture that is only empty space.
+              '.pin-spacer,[data-scrollmagic-pin-spacer]{height:auto!important;min-height:0!important;padding:0!important}',
           });
         await steadyStyles();
         await page
@@ -454,13 +457,105 @@ async function capture(
               .__captureTimeout ?? window.setTimeout.bind(window)) as typeof setTimeout;
             const sleep = (ms: number) => new Promise<void>((resolve) => timer(resolve, ms));
             await Promise.race([document.fonts.ready, sleep(3000)]);
-            for (let y = 0; y < Math.min(document.documentElement.scrollHeight, 16000); y += 800) {
-              scrollTo(0, y);
-              await sleep(100);
-            }
-            scrollTo(0, 0);
-            for (const video of document.querySelectorAll('video')) video.pause();
           });
+          // The page is read the way a visitor reads it. Many sites hold their scripts
+          // back until the first real mouse or wheel input (speed plugins do this), build
+          // sections only when they are scrolled to, and change with the scroll position.
+          // A scripted scrollTo is none of that, so real input is sent: the pointer moves,
+          // the delayed scripts get time to load, and the wheel walks the whole page.
+          await page.mouse.move(3, Math.round(height / 2)).catch(() => {});
+          await page.mouse.move(4, Math.round(height / 2) + 2).catch(() => {});
+          for (let calm = 0, waited = 0; calm < 600 && waited < 8000; waited += 200) {
+            await page.waitForTimeout(200);
+            calm = widgetDownloads.size ? 0 : calm + 200;
+          }
+          trace('first input sent');
+          const position = () =>
+            page
+              .evaluate(() => {
+                const band = (color: string) =>
+                  /rgba?\(.*,\s*0\)$|transparent/.test(color) ? '' : color;
+                return {
+                  y: Math.round(scrollY),
+                  bottom: Math.round(scrollY + innerHeight),
+                  height: document.documentElement.scrollHeight,
+                  // What the page paints behind everything at this point of the scroll.
+                  ambient:
+                    band(getComputedStyle(document.body).backgroundColor) ||
+                    band(getComputedStyle(document.documentElement).backgroundColor),
+                };
+              })
+              .catch(() => undefined);
+          const ambient: { from: number; to: number; color: string }[] = [];
+          const step = Math.round(height * 0.6);
+          let stuck = 0;
+          for (let i = 0; i < 90 && stuck < 3; i++) {
+            const before = await position();
+            if (!before || before.y >= 16000) break;
+            ambient.push({ from: before.y, to: before.bottom, color: before.ambient });
+            await page.mouse.wheel(0, step).catch(() => {});
+            await page.waitForTimeout(220);
+            let after = await position();
+            // A page that takes over the wheel (smooth scrolling, full-page slides) may
+            // not move; scroll it directly, which still fires its scroll handlers.
+            if (after && after.y <= before.y + 2 && after.bottom < after.height - 2) {
+              await page.evaluate((y) => scrollTo(0, y), before.y + step).catch(() => {});
+              await page.waitForTimeout(220);
+              after = await position();
+            }
+            if (!after) break;
+            if (after.y <= before.y + 2) {
+              // At the end: sections that render late can still make the page longer.
+              stuck++;
+              await page.waitForTimeout(350);
+            } else stuck = 0;
+          }
+          const end = await position();
+          if (end) ambient.push({ from: end.y, to: end.bottom, color: end.ambient });
+          trace(`walked the page to ${end?.y ?? '?'} of ${end?.height ?? '?'}`);
+          await page.evaluate(() => scrollTo(0, 0)).catch(() => {});
+          await page.waitForTimeout(300);
+          // Some pages recolour the whole page as sections pass (the body's colour follows
+          // the scroll). At the top only the first colour remains, so a band that showed
+          // on another colour keeps that colour as its own background.
+          await page
+            .evaluate((bands) => {
+              const clear = (color: string) => /rgba?\(.*,\s*0\)$|transparent/.test(color);
+              const top = bands[0]?.color ?? '';
+              if (!bands.some((b) => b.color && b.color !== top)) return;
+              const colorAt = (y: number) => {
+                // The step in which the point was nearest the middle of the screen.
+                let best = '',
+                  distance = Infinity;
+                for (const b of bands) {
+                  const d = Math.abs((b.from + b.to) / 2 - y);
+                  if (y >= b.from && y <= b.to && d < distance) {
+                    distance = d;
+                    best = b.color;
+                  }
+                }
+                return best;
+              };
+              const sections = [
+                ...document.querySelectorAll<HTMLElement>('body > *, body > main > *'),
+              ];
+              for (const el of sections) {
+                const box = el.getBoundingClientRect(),
+                  style = getComputedStyle(el);
+                if (box.height < 120 || box.width < innerWidth * 0.9) continue;
+                if (!clear(style.backgroundColor) || style.backgroundImage !== 'none') continue;
+                if (style.position === 'fixed' || style.position === 'sticky') continue;
+                const color = colorAt(box.top + scrollY + box.height / 2);
+                if (color && color !== top)
+                  el.style.setProperty('background-color', color, 'important');
+              }
+            }, ambient)
+            .catch(() => {});
+          await page
+            .evaluate(() => {
+              for (const video of document.querySelectorAll('video')) video.pause();
+            })
+            .catch(() => {});
           // Large photos decide their own height; measure only after they arrive.
           // 'networkidle' already resolved at page load, so it would not wait for the
           // images the scroll just requested: wait for every image to finish instead.
@@ -505,9 +600,26 @@ async function capture(
                 // never start loading; here every shown image is asked to load now.
                 await page
                   .evaluate(() => {
-                    for (const image of document.images)
-                      if (image.loading === 'lazy' && image.getClientRects().length)
-                        image.loading = 'eager';
+                    for (const image of document.images) {
+                      if (!image.getClientRects().length) continue;
+                      if (image.loading === 'lazy') image.loading = 'eager';
+                      // Script-driven lazy loading keeps the real address in a data
+                      // attribute and shows an empty placeholder until the image nears
+                      // the screen; items of a moving strip may never get there.
+                      const placeholder =
+                        !image.getAttribute('src') || image.src.startsWith('data:');
+                      const real =
+                        image.getAttribute('data-lazy-src') ??
+                        image.getAttribute('data-src') ??
+                        image.getAttribute('data-original');
+                      if (placeholder && real && !/^(data|javascript|blob):/i.test(real.trim())) {
+                        const set =
+                          image.getAttribute('data-lazy-srcset') ??
+                          image.getAttribute('data-srcset');
+                        if (set) image.srcset = set;
+                        image.src = real;
+                      }
+                    }
                   })
                   .catch(() => {});
                 // The wait follows the network: it ends when every shown image is complete,
@@ -917,7 +1029,10 @@ async function capture(
                 asset = { mime: 'image/png', body: png.data };
                 s.width = png.info.width;
                 s.height = png.info.height;
-              } catch {
+              } catch (failure) {
+                trace(
+                  `svg not drawn (${n.name}): ${String((failure as Error)?.message).slice(0, 120)}`,
+                );
                 n.kind = 'frame';
                 local.issues.push({
                   code: 'missing-asset',
