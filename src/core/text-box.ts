@@ -18,7 +18,26 @@ export function textLineBoxes(root: SceneNode): void {
         : Math.round(ratio) >= 1 && Math.abs(ratio - Math.round(ratio)) < 0.06
           ? Math.round(ratio)
           : Math.max(1, Math.round((height - text.fontSize * 1.9) / text.lineHeight) + 1);
-      const lineBox = lines * text.lineHeight;
+      // Each line is as tall as the tallest line height on it: a small date above a
+      // large headline in one paragraph has lines of two heights.
+      const starts = [0, ...(text.breaks ?? [])];
+      const mixed =
+        starts.length === lines && (text.runs ?? []).some((run) => run.lineHeight !== undefined);
+      const lineBox = mixed
+        ? starts.reduce((sum, start, i) => {
+            const end = starts[i + 1] ?? text.characters.length;
+            const heights = (text.runs ?? [])
+              .filter((run) => run.start < end && run.end > start)
+              // White space alone does not set a line's height.
+              .filter(
+                (run) =>
+                  text.characters.slice(Math.max(run.start, start), Math.min(run.end, end)).trim()
+                    .length > 0,
+              )
+              .map((run) => run.lineHeight ?? text.lineHeight);
+            return sum + (heights.length ? Math.max(...heights) : text.lineHeight);
+          }, 0)
+        : lines * text.lineHeight;
       if (Math.abs(lineBox - height) > 0.5) {
         node.bounds = {
           ...node.bounds,
