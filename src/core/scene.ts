@@ -86,6 +86,8 @@ export type TextSpec = {
   lines?: number;
   /** Offsets in `characters` where the browser started each line after the first. */
   breaks?: number[];
+  /** The breaks are a choice the width does not explain (balanced lines): keep them. */
+  keepBreaks?: boolean;
   resolvedFontFamily?: string;
   /** The style name of the installed face that drew the text, when its file is known. */
   resolvedFontStyle?: string;
@@ -351,6 +353,7 @@ export function validateScene(input: unknown): ScenePackage {
     optional(t, 'sizing', (v, q) => en(v, q, ['inline', 'block']), p);
     optional(t, 'maxLines', (v, q) => integer(v, q, 1, 1000), p);
     optional(t, 'lines', (v, q) => integer(v, q, 1, 100000), p);
+    optional(t, 'keepBreaks', bool, p);
     optional(
       t,
       'breaks',

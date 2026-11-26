@@ -1438,6 +1438,8 @@ export function collect(selector: string | undefined): {
           style: {
             opacity: 1,
             background: fill,
+            // Painted under the copy.
+            zIndex: -1,
             ...(radius ? { radius: [radius, radius, radius, radius] } : {}),
           },
           position: 'absolute',
@@ -1601,6 +1603,7 @@ export function collect(selector: string | undefined): {
         sizing: intrinsicText ? 'inline' : 'block',
         lines: lineCount(textRange),
         ...lineBreaks(el, characters, lineCount(textRange)),
+        ...(/balance|pretty/.test(c.getPropertyValue('text-wrap')) ? { keepBreaks: true } : {}),
         ...(c.textOverflow === 'ellipsis' && c.whiteSpace === 'nowrap' ? { maxLines: 1 } : {}),
         ...textCase(c),
         ...textShadow(c),

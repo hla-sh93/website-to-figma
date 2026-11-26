@@ -932,3 +932,31 @@ test('a substituted font keeps the line breaks of the browser; an available font
   assert.equal(byId('missing').characters.length, 27);
   assert.equal(byId('present').characters, 'one two three four five six');
 });
+
+test('a short grid item centred beside a tall one stays in its row', async () => {
+  const { byId } = await render(
+    scene([
+      node('pair', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1268, height: 635 },
+        layout: {
+          ...flowLayout('vertical'),
+          mode: 'grid',
+          gap: 16,
+          rowGap: 16,
+          columns: 2,
+          tracks: [626, 626],
+        },
+        children: [
+          node('copy', { position: 'flow', bounds: { x: 0, y: 157, width: 626, height: 321 } }),
+          node('photos', { position: 'flow', bounds: { x: 642, y: 0, width: 626, height: 635 } }),
+        ],
+      }),
+    ]),
+  );
+  // One row: nothing is moved to a second one, and the copy is centred in it.
+  assert.notEqual(byId('pair').gridItemsPositioning, 'MANUAL');
+  assert.equal(byId('pair').gridRowCount, 1);
+  assert.equal(byId('copy').gridChildVerticalAlign, 'CENTER');
+  assert.equal(byId('photos').gridChildVerticalAlign, 'MIN');
+});

@@ -619,6 +619,25 @@ export async function renderScene(
   };
   // Auto flow fills each row from the left. A short last row in a right-to-left
   // grid starts at the right edge, so measured cells are placed explicitly.
+  // Rows of a grid as the browser laid them out. Items of one row overlap vertically
+  // but need not start at the same height: a short item centred beside a tall one is
+  // still in that row.
+  const gridRows = (source: SceneNode): { top: number; bottom: number }[] => {
+    const rows: { top: number; bottom: number }[] = [];
+    const items = source.children
+      .filter((c) => c.position !== 'absolute' && c.source.tag !== '#background')
+      .sort((a, b) => a.bounds.y - b.bounds.y);
+    for (const item of items) {
+      const top = item.bounds.y,
+        bottom = item.bounds.y + item.bounds.height;
+      const row = rows.at(-1);
+      if (row && top < row.bottom - 2) row.bottom = Math.max(row.bottom, bottom);
+      else rows.push({ top, bottom });
+    }
+    return rows;
+  };
+  const gridRowOf = (rows: { top: number; bottom: number }[], c: SceneNode) =>
+    rows.findIndex((row) => c.bounds.y >= row.top - 2 && c.bounds.y < row.bottom - 2);
   const placeGridCells = (node: FrameNode, source: SceneNode, screenId: string) => {
     const items = source.children.filter(
       (c) => c.position !== 'absolute' && c.source.tag !== '#background',
@@ -631,12 +650,10 @@ export async function renderScene(
       (_, i) => left + tracks.slice(0, i).reduce((sum, w) => sum + w, 0) + layout.gap * i,
     );
     const columnOf = (c: SceneNode) => starts.findIndex((x) => Math.abs(c.bounds.x - x) <= 2);
-    const rows: number[] = [];
-    for (const y of items.map((c) => c.bounds.y).sort((a, b) => a - b))
-      if (!rows.length || y - rows.at(-1)! > 2) rows.push(y);
+    const rows = gridRows(source);
     const cells = items.map((c) => ({
       node: node.children.find((n) => n.id === mapping[`${screenId}:${c.id}`]),
-      row: rows.findIndex((y) => Math.abs(c.bounds.y - y) <= 2),
+      row: gridRowOf(rows, c),
       column: columnOf(c),
     }));
     if (
@@ -893,7 +910,7 @@ export async function renderScene(
         (text.runs ?? []).some(
           (run) => !fonts.resolutions.get(fontKey(fontRequest(text, run)))!.exact,
         );
-      if (substitute && text.breaks?.length && !text.maxLines) {
+      if ((substitute || text.keepBreaks) && text.breaks?.length && !text.maxLines) {
         const letters = [...characters];
         if (letters.length === characters.length) {
           for (const offset of text.breaks)
@@ -1352,7 +1369,13 @@ export async function renderScene(
         if (huggers.has(source.id) && firstTextDirection(source) === 'rtl')
           native.x += source.bounds.width - native.width;
       } else if (mode === 'grid') {
-        native.gridChildVerticalAlign = 'MIN';
+        // Where the item sits in its row: at the top, centred, or at the bottom.
+        const rows = gridRows(parentSource);
+        const row = rows[gridRowOf(rows, source)];
+        const above = row ? source.bounds.y - row.top : 0,
+          below = row ? row.bottom - source.bounds.y - source.bounds.height : 0;
+        native.gridChildVerticalAlign =
+          above <= 2 ? 'MIN' : Math.abs(above - below) <= 2 ? 'CENTER' : below <= 2 ? 'MAX' : 'MIN';
         // A cell fills its column only when it was measured that wide; a narrower item
         // (a link under a heading) keeps its width at the edge it was measured on.
         const parentLayout = layoutOf(parentSource);

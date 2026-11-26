@@ -233,6 +233,15 @@ async function capture(
       assets: [],
       issues: [],
     };
+    // One width at a time holds the front tab while it sends input.
+    let turn: Promise<void> = Promise.resolve();
+    const inputTurn = async (): Promise<() => void> => {
+      const previous = turn;
+      let release!: () => void;
+      turn = new Promise<void>((resolve) => (release = resolve));
+      await previous;
+      return release;
+    };
     // Font files the page loaded, by address (one copy for all widths).
     const fontDownloads = new Map<string, Uint8Array | undefined>();
     // Style sheet text by address: its @font-face rules name the fonts.
@@ -463,58 +472,67 @@ async function capture(
           // sections only when they are scrolled to, and change with the scroll position.
           // A scripted scrollTo is none of that, so real input is sent: the pointer moves,
           // the delayed scripts get time to load, and the wheel walks the whole page.
-          await page.mouse.move(3, Math.round(height / 2)).catch(() => {});
-          await page.mouse.move(4, Math.round(height / 2) + 2).catch(() => {});
-          for (let calm = 0, waited = 0; calm < 600 && waited < 8000; waited += 200) {
-            await page.waitForTimeout(200);
-            calm = widgetDownloads.size ? 0 : calm + 200;
-          }
-          trace('first input sent');
-          const position = () =>
-            page
-              .evaluate(() => {
-                const band = (color: string) =>
-                  /rgba?\(.*,\s*0\)$|transparent/.test(color) ? '' : color;
-                return {
-                  y: Math.round(scrollY),
-                  bottom: Math.round(scrollY + innerHeight),
-                  height: document.documentElement.scrollHeight,
-                  // What the page paints behind everything at this point of the scroll.
-                  ambient:
-                    band(getComputedStyle(document.body).backgroundColor) ||
-                    band(getComputedStyle(document.documentElement).backgroundColor),
-                };
-              })
-              .catch(() => undefined);
+          // Pointer and wheel input reach only the tab in front, and each width has its
+          // own tab: walked at the same time, one of them scrolls without its sections
+          // ever being told a visitor arrived. The widths take turns in front.
           const ambient: { from: number; to: number; color: string }[] = [];
-          const step = Math.round(height * 0.6);
-          let stuck = 0;
-          for (let i = 0; i < 90 && stuck < 3; i++) {
-            const before = await position();
-            if (!before || before.y >= 16000) break;
-            ambient.push({ from: before.y, to: before.bottom, color: before.ambient });
-            await page.mouse.wheel(0, step).catch(() => {});
-            await page.waitForTimeout(220);
-            let after = await position();
-            // A page that takes over the wheel (smooth scrolling, full-page slides) may
-            // not move; scroll it directly, which still fires its scroll handlers.
-            if (after && after.y <= before.y + 2 && after.bottom < after.height - 2) {
-              await page.evaluate((y) => scrollTo(0, y), before.y + step).catch(() => {});
-              await page.waitForTimeout(220);
-              after = await position();
+          const release = await inputTurn();
+          try {
+            await page.bringToFront().catch(() => {});
+            await page.mouse.move(3, Math.round(height / 2)).catch(() => {});
+            await page.mouse.move(4, Math.round(height / 2) + 2).catch(() => {});
+            for (let calm = 0, waited = 0; calm < 600 && waited < 8000; waited += 200) {
+              await page.waitForTimeout(200);
+              calm = widgetDownloads.size ? 0 : calm + 200;
             }
-            if (!after) break;
-            if (after.y <= before.y + 2) {
-              // At the end: sections that render late can still make the page longer.
-              stuck++;
-              await page.waitForTimeout(350);
-            } else stuck = 0;
+            trace('first input sent');
+            const position = () =>
+              page
+                .evaluate(() => {
+                  const band = (color: string) =>
+                    /rgba?\(.*,\s*0\)$|transparent/.test(color) ? '' : color;
+                  return {
+                    y: Math.round(scrollY),
+                    bottom: Math.round(scrollY + innerHeight),
+                    height: document.documentElement.scrollHeight,
+                    // What the page paints behind everything at this point of the scroll.
+                    ambient:
+                      band(getComputedStyle(document.body).backgroundColor) ||
+                      band(getComputedStyle(document.documentElement).backgroundColor),
+                  };
+                })
+                .catch(() => undefined);
+            const step = Math.round(height * 0.6);
+            let stuck = 0;
+            for (let i = 0; i < 90 && stuck < 3; i++) {
+              const before = await position();
+              if (!before || before.y >= 16000) break;
+              ambient.push({ from: before.y, to: before.bottom, color: before.ambient });
+              await page.mouse.wheel(0, step).catch(() => {});
+              await page.waitForTimeout(220);
+              let after = await position();
+              // A page that takes over the wheel (smooth scrolling, full-page slides) may
+              // not move; scroll it directly, which still fires its scroll handlers.
+              if (after && after.y <= before.y + 2 && after.bottom < after.height - 2) {
+                await page.evaluate((y) => scrollTo(0, y), before.y + step).catch(() => {});
+                await page.waitForTimeout(220);
+                after = await position();
+              }
+              if (!after) break;
+              if (after.y <= before.y + 2) {
+                // At the end: sections that render late can still make the page longer.
+                stuck++;
+                await page.waitForTimeout(350);
+              } else stuck = 0;
+            }
+            const end = await position();
+            if (end) ambient.push({ from: end.y, to: end.bottom, color: end.ambient });
+            trace(`walked the page to ${end?.y ?? '?'} of ${end?.height ?? '?'}`);
+            await page.evaluate(() => scrollTo(0, 0)).catch(() => {});
+            await page.waitForTimeout(300);
+          } finally {
+            release();
           }
-          const end = await position();
-          if (end) ambient.push({ from: end.y, to: end.bottom, color: end.ambient });
-          trace(`walked the page to ${end?.y ?? '?'} of ${end?.height ?? '?'}`);
-          await page.evaluate(() => scrollTo(0, 0)).catch(() => {});
-          await page.waitForTimeout(300);
           // Some pages recolour the whole page as sections pass (the body's colour follows
           // the scroll). At the top only the first colour remains, so a band that showed
           // on another colour keeps that colour as its own background.
