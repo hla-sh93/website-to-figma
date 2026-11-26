@@ -67,3 +67,29 @@ test('lines inside an inline-block heading are counted', () => {
   assert.equal(heading.text!.lines, 2);
   assert.ok(heading.bounds.height >= 70);
 });
+
+test('a highlighted phrase and a border underline inside copy become boxes behind it', async () => {
+  const page = `<!doctype html><html><head><style>
+  body{margin:0;font:20px/30px Arial}
+  h1{margin:0;width:260px;font:20px/30px Arial}
+  .highlight{background:rgb(124,76,219);border-radius:5px;padding:0 4px}
+  .underline{border-bottom:3px solid rgb(0,150,90)}
+  </style></head><body><h1>Plain <span class="highlight">marked words that wrap onto two lines</span> and <span class="underline">lined</span></h1></body></html>`;
+  const all = flatten((await captureHtml(page, { widths: [800] })).screens[0]!.root);
+  const title = all.find((n) => n.children.some((c) => c.text?.characters.startsWith('Plain')))!;
+  const highlights = title.children.filter((c) => c.name === 'Highlight');
+  const underline = title.children.filter((c) => c.name === 'Underline');
+  // One box per line of the phrase, behind the copy (earlier in the children).
+  assert.equal(highlights.length, 2);
+  assert.deepEqual(
+    [highlights[0]!.style.background!.r, highlights[0]!.style.background!.g].map((v) =>
+      Math.round(v * 255),
+    ),
+    [124, 76],
+  );
+  assert.equal(highlights[0]!.style.radius?.[0], 5);
+  assert.equal(underline.length, 1);
+  assert.equal(Math.round(underline[0]!.bounds.height), 3);
+  assert.equal(title.children.at(-1)!.kind, 'text');
+  assert.ok(highlights.every((h) => h.position === 'absolute'));
+});

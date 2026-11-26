@@ -1418,13 +1418,65 @@ export function collect(selector: string | undefined): {
       n.kind = 'text';
       let characters = '';
       const runs: NonNullable<NonNullable<SceneNode['text']>['runs']> = [];
+      // Boxes drawn behind or under part of the copy: a highlighted phrase (an inline
+      // background) and an underline made with a bottom border. One box per line the
+      // phrase is on, placed where the browser painted it.
+      const marks: SceneNode[] = [];
+      const mark = (
+        name: string,
+        box: { x: number; y: number; width: number; height: number },
+        fill: ReturnType<typeof color>,
+        radius: number,
+      ) => {
+        if (box.width < 1 || box.height < 0.5 || marks.length >= 40) return;
+        marks.push({
+          id: `${id}/mark-${marks.length}`,
+          name,
+          kind: 'frame',
+          source: { tag: 'span' },
+          bounds: { x: box.x + scrollX, y: box.y + scrollY, width: box.width, height: box.height },
+          style: {
+            opacity: 1,
+            background: fill,
+            ...(radius ? { radius: [radius, radius, radius, radius] } : {}),
+          },
+          position: 'absolute',
+          children: [],
+        });
+      };
       const add = (node: Node) => {
         if (node instanceof Element) {
           if (hidden(node)) return;
           const inline = getComputedStyle(node);
+          const paint = color(inline.backgroundColor),
+            underline = px(inline.borderBottomWidth),
+            underlineColor = color(inline.borderBottomColor);
+          const marked =
+            node !== el &&
+            inline.display === 'inline' &&
+            (paint.a > 0 ||
+              (underline > 0 && inline.borderBottomStyle !== 'none' && underlineColor.a > 0));
+          if (marked)
+            for (const rect of node.getClientRects()) {
+              if (paint.a > 0)
+                mark(
+                  'Highlight',
+                  rect,
+                  paint,
+                  Math.min(px(inline.borderTopLeftRadius), rect.height / 2),
+                );
+              if (underline > 0 && inline.borderBottomStyle !== 'none' && underlineColor.a > 0)
+                mark(
+                  'Underline',
+                  { x: rect.x, y: rect.bottom - underline, width: rect.width, height: underline },
+                  underlineColor,
+                  0,
+                );
+            }
           if (
             node !== el &&
-            (color(inline.backgroundColor).a > 0 ||
+            !marked &&
+            (paint.a > 0 ||
               inline.backgroundImage !== 'none' ||
               Number(inline.opacity) !== 1 ||
               px(inline.borderTopWidth) ||
@@ -1562,6 +1614,7 @@ export function collect(selector: string | undefined): {
         !!n.style.gradients?.length ||
         !!n.style.backdropBlur ||
         pseudoNodes.before.length + pseudoNodes.after.length > 0 ||
+        marks.length > 0 ||
         [c.paddingTop, c.paddingRight, c.paddingBottom, c.paddingLeft].some((v) => px(v) > 0);
       if (decorated) {
         const child: SceneNode = {
@@ -1596,7 +1649,8 @@ export function collect(selector: string | undefined): {
         };
         delete n.text;
         n.kind = 'frame';
-        n.children = [child];
+        // Marks come first: they sit behind the copy.
+        n.children = [...marks, child];
         textSources.push({ nodeId: child.id, selector: cssPath(el) });
       } else {
         if (textGradients.length) n.style.gradients = textGradients;

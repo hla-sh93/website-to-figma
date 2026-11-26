@@ -225,6 +225,9 @@ function derive(
   )
     return first ? `Card / ${short(first, 32)}` : 'Card';
   if (children.length === 1 && children[0]!.kind === 'image' && !texts) return 'Image';
+  // Marks behind a phrase are named when they are captured.
+  if (node.id.includes('/mark-') && (node.name === 'Highlight' || node.name === 'Underline'))
+    return node.name;
   if (!children.length) return node.style.background || node.style.gradients ? 'Shape' : 'Spacer';
   if (
     texts &&
