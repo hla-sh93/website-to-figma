@@ -1025,3 +1025,63 @@ test('copy drawn on another number of lines than the browser gets the browser br
   // Drawn on the lines the browser had: left as running copy.
   assert.equal(byId('same').characters, 'one two three four five six');
 });
+
+test('distances between neighbours are exact when margins add to the gap', async () => {
+  const row = (id: string, y: number, height: number) =>
+    node(id, { position: 'flow', bounds: { x: 0, y, width: 300, height } });
+  const { byId } = await render(
+    scene([
+      // CSS gap 16; the browser shows 0, 32 and 32 (margins on the dividers).
+      node('footer', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 300, height: 259 },
+        layout: flowLayout('vertical', { gap: 16 }),
+        children: [row('a', 0, 64), row('b', 64, 100), row('line', 196, 1), row('c', 229, 30)],
+      }),
+      // All distances equal to the gap: plain spacing, no spacer layers.
+      node('even', {
+        position: 'flow',
+        bounds: { x: 0, y: 300, width: 300, height: 76 },
+        layout: flowLayout('vertical', { gap: 16 }),
+        children: [row('d', 300, 30), row('e', 346, 30)],
+      }),
+    ]),
+  );
+  const footer = byId('footer');
+  assert.equal(footer.itemSpacing, 0);
+  assert.deepEqual(
+    footer.children.map((c: { name: string; height: number }) =>
+      c.name.startsWith('Spacing') ? c.height : c.name,
+    ),
+    ['a', 'b', 32, 'line', 32, 'c'],
+  );
+  assert.equal(byId('even').itemSpacing, 16);
+  assert.equal(byId('even').children.length, 2);
+});
+
+test('a grid item centred in its track keeps that track when an earlier cell is empty', async () => {
+  const { byId } = await render(
+    scene([
+      node('bar', {
+        position: 'flow',
+        bounds: { x: 0, y: 0, width: 1328, height: 21 },
+        layout: {
+          ...flowLayout('vertical'),
+          mode: 'grid',
+          gap: 16,
+          rowGap: 16,
+          columns: 3,
+          tracks: [432, 432, 432],
+        },
+        children: [
+          // The first cell holds nothing visible; these sit in the second and third.
+          node('links', { position: 'flow', bounds: { x: 545, y: 0, width: 238, height: 21 } }),
+          node('rights', { position: 'flow', bounds: { x: 1063, y: 0, width: 265, height: 21 } }),
+        ],
+      }),
+    ]),
+  );
+  assert.equal(byId('bar').gridItemsPositioning, 'MANUAL');
+  assert.equal(byId('links').gridColumnAnchorIndex, 1);
+  assert.equal(byId('rights').gridColumnAnchorIndex, 2);
+});

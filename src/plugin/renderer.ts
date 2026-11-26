@@ -649,7 +649,13 @@ export async function renderScene(
     const starts = tracks.map(
       (_, i) => left + tracks.slice(0, i).reduce((sum, w) => sum + w, 0) + layout.gap * i,
     );
-    const columnOf = (c: SceneNode) => starts.findIndex((x) => Math.abs(c.bounds.x - x) <= 2);
+    // By the item's middle: an item centred or right-aligned in its track does not
+    // start where the track starts.
+    const columnOf = (c: SceneNode) =>
+      starts.findIndex((x, i) => {
+        const middle = c.bounds.x + c.bounds.width / 2;
+        return middle >= x - 1 && middle < x + tracks[i]! + 1;
+      });
     const rows = gridRows(source);
     const cells = items.map((c) => ({
       node: node.children.find((n) => n.id === mapping[`${screenId}:${c.id}`]),
@@ -699,6 +705,7 @@ export async function renderScene(
     spacing: number;
     breaks: number[];
     shift: number;
+    leftAligned: boolean;
   }[] = [];
   const brokenTexts: {
     node: TextNode;
@@ -795,7 +802,17 @@ export async function renderScene(
           t.node.deleteCharacters(at, at + 1);
           changed = true;
         }
-        if (changed) brokenTexts.push(t);
+        // Every line start is explicit when each break is a separator or follows a
+        // line feed already in the copy.
+        const now = t.node.characters;
+        const explicit = t.breaks.every((offset) =>
+          /[\u2028\n]/.test(now[offset + t.shift - 1] ?? ''),
+        );
+        if (explicit && t.leftAligned && t.node.height > t.height + t.lineHeight / 2) {
+          // A line a few pixels too wide for the measured box would wrap again; the
+          // lines are fixed, so the box takes their width and the copy keeps its lines.
+          t.node.textAutoResize = 'WIDTH_AND_HEIGHT';
+        } else if (changed) brokenTexts.push(t);
       }
       wrapChecks.length = 0;
       for (const t of brokenTexts.filter((t) => t.node.height > t.height + t.lineHeight / 2)) {
@@ -1286,26 +1303,35 @@ export async function renderScene(
       const builtAbsolute = new Set<string>();
       const builtChildren = new Map<string, Awaited<ReturnType<typeof buildNative>>>();
       let previous: SceneNode | undefined;
+      // Distances between neighbours as the browser laid them out. Margins make them
+      // differ from the CSS gap, and from each other. A spacer layer adds its own size
+      // plus one more item spacing, so with any spacing above zero some distances cannot
+      // be made (anything between one and two gaps). When the distances are not all the
+      // gap, the spacing is zero and every distance is its own spacer: exact, whatever
+      // mix of gap and margins produced it.
+      const spaced =
+        (layout.mode === 'vertical' || layout.mode === 'horizontal') &&
+        !layout.wrap &&
+        layout.justify !== 'space-between';
+      const distance = (before: SceneNode, after: SceneNode) =>
+        layout.mode === 'vertical'
+          ? after.bounds.y - before.bounds.y - before.bounds.height
+          : after.bounds.x - before.bounds.x - before.bounds.width;
+      const flowing = source.children.filter((c) => c.position !== 'absolute');
+      const uneven =
+        spaced &&
+        flowing.some((c, i) => i > 0 && Math.abs(distance(flowing[i - 1]!, c) - layout.gap) > 1);
+      if (uneven && 'itemSpacing' in node) bindNumber(node as FrameNode, 'itemSpacing', 0);
       for (const child of source.children) {
-        if (
-          previous &&
-          child.position !== 'absolute' &&
-          layout.mode !== 'none' &&
-          layout.mode !== 'grid' &&
-          !layout.wrap &&
-          layout.justify !== 'space-between'
-        ) {
+        if (previous && child.position !== 'absolute' && uneven) {
           const vertical = layout.mode === 'vertical';
-          const measured = vertical
-            ? child.bounds.y - previous.bounds.y - previous.bounds.height
-            : child.bounds.x - previous.bounds.x - previous.bounds.width;
-          const extra = measured - layout.gap;
-          if (extra > 1) {
+          const measured = distance(previous, child);
+          if (measured > 0.5) {
             const spacer = api.createFrame();
             node.appendChild(spacer);
             spacer.name = 'Spacing / source margin';
             spacer.fills = [];
-            spacer.resize(vertical ? 0.01 : extra, vertical ? extra : 0.01);
+            spacer.resize(vertical ? 0.01 : measured, vertical ? measured : 0.01);
             paintRanks.set(spacer.id, paintRank(child));
           }
         }
@@ -1591,6 +1617,7 @@ export async function renderScene(
             spacing: source.text!.letterSpacing,
             breaks: source.text!.breaks,
             shift: rtlMark(source.text!).length,
+            leftAligned: source.text!.align === 'left' && source.text!.direction === 'ltr',
           });
         if (keptBreaks.has(source.id) && native.textAutoResize === 'HEIGHT')
           brokenTexts.push({
