@@ -120,7 +120,7 @@ test('decorated text, mixed assets, sizing, shadows and SVG image pixels retain 
   assert.ok(pixels.info.width > 0 && pixels.info.height > 0);
   assert.ok(pixels.data.some((v) => v > 0));
 });
-test('capture cap excludes unseen geometry and rejects a continuously moving layout', async () => {
+test('capture cap excludes unseen geometry and freezes a continuously moving layout', async () => {
   const scene = await captureHtml(
     '<body style="margin:0"><div style="height:17000px;background:red">Tall</div></body>',
     { widths: [390] },
@@ -133,13 +133,14 @@ test('capture cap excludes unseen geometry and rejects a continuously moving lay
     }),
     /visible|covered/i,
   );
-  await assert.rejects(
-    captureHtml(
-      '<div id="move" style="position:absolute;width:50px;height:50px">Move</div><script>let x=0;setInterval(()=>document.getElementById("move").style.left=(++x%100)+"px",30)</script>',
-      { widths: [390] },
-    ),
-    /لم يستقر|تغيّر/,
+  // Continuous motion is frozen at one frame instead of failing the capture.
+  const moving = await captureHtml(
+    '<div id="move" style="position:absolute;width:50px;height:50px">Move</div><script>let x=0;setInterval(()=>document.getElementById("move").style.left=(++x%100)+"px",30)</script>',
+    { widths: [390] },
   );
+  assert.ok(moving.issues.some((issue) => issue.code === 'motion-frozen'));
+  const box = walk(moving.screens[0]!.root).find((n) => n.source.key === 'move')!;
+  assert.ok(box.bounds.x >= 0 && box.bounds.x < 100);
 });
 
 test('reference frame covers the screenshot viewport including default body margins and ancestor background', async () => {

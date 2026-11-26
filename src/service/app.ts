@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { captureHtml, captureUrl } from '../capture/capture.js';
 import { analyzeScene, flatten } from '../core/analysis.js';
 import { comparePng, compareGeometry, type GeometryRecord } from '../quality/compare.js';
@@ -25,6 +26,8 @@ const defaultRunner: CaptureRunner = async (request, signal, onProgress) => {
     signal,
     onProgress,
     selector: request.selector,
+    // Kept beside the project so the fonts are easy to find and install.
+    fontsDir: fileURLToPath(new URL('../../output/site-fonts', import.meta.url)),
   };
   return request.demo
     ? captureHtml(
@@ -184,7 +187,14 @@ export async function createLocalService(
       }
       if (!job.scene || job.state !== 'ready') throw new HttpError(409, 'Capture is not ready.');
       if (req.method === 'GET' && match[2] === 'scene') {
-        send(200, job.scene);
+        if (url.searchParams.get('screenshots') === '0') {
+          // The editor never uses screenshots; omit them to cut the payload.
+          const { screens, ...rest } = job.scene;
+          send(200, {
+            ...rest,
+            screens: screens.map(({ screenshot: _screenshot, ...screen }) => screen),
+          });
+        } else send(200, job.scene);
         return;
       }
       if (req.method === 'POST' && match[2] === 'compare') {

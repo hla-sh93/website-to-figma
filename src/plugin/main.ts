@@ -1,10 +1,13 @@
 import { validateScene, type ScenePackage } from '../core/scene.js';
 import { flatten } from '../core/analysis.js';
 import { renderScene, preflightFonts, type RenderResult } from './renderer.js';
+import { validateFontRequests } from './fonts.js';
 import { installedPairingKey, installedVerificationUrl } from './connection.js';
 import { errorMessage } from './errors.js';
 import { verifyNativeResult } from '../../tests/native-validation.js';
 declare const __html__: string;
+/** Replaced at build time: false for the shipped plugin, true for the diagnostic build. */
+declare const __DIAGNOSTICS__: boolean;
 figma.showUI(__html__, { width: 400, height: 510, themeColors: true });
 let current: ScenePackage | undefined,
   result: RenderResult | undefined,
@@ -32,7 +35,7 @@ figma.ui.onmessage = async (message: unknown) => {
       const p = data.preferences as Record<string, unknown> | undefined;
       if (
         p &&
-        ['1440', '768', '390', 'all'].includes(String(p.size)) &&
+        ['1440', '768', '390', 'desktop-mobile', 'all'].includes(String(p.size)) &&
         ['light', 'dark'].includes(String(p.theme)) &&
         ['original', 'ar', 'en'].includes(String(p.language))
       )
@@ -48,10 +51,9 @@ figma.ui.onmessage = async (message: unknown) => {
       return;
     }
     if (data.type === 'PREFLIGHT') {
-      const scene = validateScene(data.scene);
       const fonts = await preflightFonts(
         figma,
-        scene,
+        validateFontRequests(data.fonts),
         typeof data.fallback === 'string' ? data.fallback : undefined,
       );
       post('PREFLIGHT_RESULT', {
@@ -67,10 +69,8 @@ figma.ui.onmessage = async (message: unknown) => {
       cancelled = false;
       try {
         const scene = validateScene(data.scene);
-        if (installedVerificationUrl()) {
-          const pageName = /^https:\/\/www\.amazon\.co\.uk\/?$/.test(installedVerificationUrl())
-            ? 'فحص Home — Amazon'
-            : 'Website capture verification';
+        if (__DIAGNOSTICS__ && installedVerificationUrl()) {
+          const pageName = 'Website capture verification';
           const page = figma.root.children.find((p) => p.name === pageName) ?? figma.createPage();
           page.name = pageName;
           await figma.setCurrentPageAsync(page);
@@ -80,6 +80,7 @@ figma.ui.onmessage = async (message: unknown) => {
           fontPolicy: data.allowSubstitution === true ? 'substitute' : 'stop',
           fallbackFamily: typeof data.fallback === 'string' ? data.fallback : undefined,
           foundations: data.foundations !== false,
+          validated: true,
           isCancelled: () => cancelled,
           onProgress: (done, total) => {
             if (done - last >= 15 || done === total) {
@@ -90,7 +91,7 @@ figma.ui.onmessage = async (message: unknown) => {
         });
         current = scene;
         result = next;
-        if (installedVerificationUrl() === 'fixture:features') {
+        if (__DIAGNOSTICS__ && installedVerificationUrl() === 'fixture:features') {
           try {
             const verified = await verifyNativeResult(figma, scene, next);
             post('NATIVE_FUNCTIONAL', {
@@ -124,89 +125,97 @@ figma.ui.onmessage = async (message: unknown) => {
       }
       return;
     }
-    if (data.type === 'VERIFY_PREVIEW') {
+    if (__DIAGNOSTICS__ && data.type === 'VERIFY_PREVIEW') {
       if (busy || !current || !result) throw new Error('Import not available for native preview.');
-      const root = await figma.getNodeByIdAsync(result.screenIds[0]!);
-      if (!root || !('exportAsync' in root) || !('absoluteTransform' in root))
-        throw new Error('Imported frame not found.');
-      const bytes = await root.exportAsync({
-        format: 'PNG',
-        constraint: { type: 'WIDTH', value: 640 },
-      });
-      const nodes = [];
-      for (const source of flatten(current.screens[0]!.root)) {
-        const id = result.mapping[current.screens[0]!.id + ':' + source.id];
-        const native = id ? await figma.getNodeByIdAsync(id) : null;
-        if (!native || !('absoluteTransform' in native)) continue;
-        let intrinsicWidth: number | undefined;
-        if (native.type === 'TEXT' && source.text && !source.text.characters.includes('\n')) {
-          const probe = native.clone();
-          try {
-            if (probe.parent && 'layoutMode' in probe.parent && probe.parent.layoutMode !== 'NONE')
-              probe.layoutPositioning = 'ABSOLUTE';
-            probe.textAutoResize = 'WIDTH_AND_HEIGHT';
-            intrinsicWidth = probe.width;
-          } finally {
-            probe.remove();
+      // One preview per imported screen, at source scale, for side-by-side comparison.
+      for (const [index, screen] of current.screens.entries()) {
+        const root = await figma.getNodeByIdAsync(result.screenIds[index]!);
+        if (!root || !('exportAsync' in root) || !('absoluteTransform' in root))
+          throw new Error('Imported frame not found.');
+        const bytes = await root.exportAsync({
+          format: 'JPG',
+          constraint: { type: 'WIDTH', value: Math.min(1440, Math.round(root.width)) },
+        });
+        const nodes = [];
+        for (const source of flatten(screen.root)) {
+          const id = result.mapping[screen.id + ':' + source.id];
+          const native = id ? await figma.getNodeByIdAsync(id) : null;
+          if (!native || !('absoluteTransform' in native)) continue;
+          let intrinsicWidth: number | undefined;
+          if (native.type === 'TEXT' && source.text && !source.text.characters.includes('\n')) {
+            const probe = native.clone();
+            try {
+              if (
+                probe.parent &&
+                'layoutMode' in probe.parent &&
+                probe.parent.layoutMode !== 'NONE'
+              )
+                probe.layoutPositioning = 'ABSOLUTE';
+              probe.textAutoResize = 'WIDTH_AND_HEIGHT';
+              intrinsicWidth = probe.width;
+            } finally {
+              probe.remove();
+            }
           }
+          nodes.push({
+            sourceId: source.id,
+            name: source.name,
+            kind: source.kind,
+            expected: source.bounds,
+            actual: {
+              x:
+                native.absoluteTransform[0][2] -
+                root.absoluteTransform[0][2] +
+                screen.root.bounds.x,
+              y:
+                native.absoluteTransform[1][2] -
+                root.absoluteTransform[1][2] +
+                screen.root.bounds.y,
+              width: native.width,
+              height: native.height,
+            },
+            ...(native.type === 'TEXT'
+              ? {
+                  align: native.textAlignHorizontal,
+                  resizing: native.textAutoResize,
+                  expectedAlign: source.text?.align,
+                  expectedSizing: source.text?.sizing,
+                  intrinsicWidth,
+                  fontSegments: native
+                    .getStyledTextSegments(['fontName', 'fontSize', 'letterSpacing', 'lineHeight'])
+                    .map((segment) => ({
+                      start: segment.start,
+                      end: segment.end,
+                      fontName: segment.fontName,
+                      fontSize: segment.fontSize,
+                      letterSpacing: segment.letterSpacing,
+                      lineHeight: segment.lineHeight,
+                    })),
+                  expectedFont: source.text
+                    ? {
+                        family: source.text.fontFamily,
+                        weight: source.text.fontWeight,
+                        size: source.text.fontSize,
+                        lineHeight: source.text.lineHeight,
+                        letterSpacing: source.text.letterSpacing,
+                      }
+                    : undefined,
+                }
+              : {}),
+          });
         }
-        nodes.push({
-          sourceId: source.id,
-          name: source.name,
-          kind: source.kind,
-          expected: source.bounds,
-          actual: {
-            x:
-              native.absoluteTransform[0][2] -
-              root.absoluteTransform[0][2] +
-              current.screens[0]!.root.bounds.x,
-            y:
-              native.absoluteTransform[1][2] -
-              root.absoluteTransform[1][2] +
-              current.screens[0]!.root.bounds.y,
-            width: native.width,
-            height: native.height,
-          },
-          ...(native.type === 'TEXT'
-            ? {
-                align: native.textAlignHorizontal,
-                resizing: native.textAutoResize,
-                expectedAlign: source.text?.align,
-                expectedSizing: source.text?.sizing,
-                intrinsicWidth,
-                fontSegments: native
-                  .getStyledTextSegments(['fontName', 'fontSize', 'letterSpacing', 'lineHeight'])
-                  .map((segment) => ({
-                    start: segment.start,
-                    end: segment.end,
-                    fontName: segment.fontName,
-                    fontSize: segment.fontSize,
-                    letterSpacing: segment.letterSpacing,
-                    lineHeight: segment.lineHeight,
-                  })),
-                expectedFont: source.text
-                  ? {
-                      family: source.text.fontFamily,
-                      weight: source.text.fontWeight,
-                      size: source.text.fontSize,
-                      lineHeight: source.text.lineHeight,
-                      letterSpacing: source.text.letterSpacing,
-                    }
-                  : undefined,
-              }
-            : {}),
+        post('NATIVE_PREVIEW', {
+          png: figma.base64Encode(bytes),
+          screenId: screen.id,
+          nodes,
+          nodeId: root.id,
+          pageId: figma.currentPage.id,
+          requestId: data.requestId,
         });
       }
-      post('NATIVE_PREVIEW', {
-        png: figma.base64Encode(bytes),
-        nodes,
-        nodeId: root.id,
-        pageId: figma.currentPage.id,
-        requestId: data.requestId,
-      });
       return;
     }
-    if (data.type === 'VERIFY') {
+    if (__DIAGNOSTICS__ && data.type === 'VERIFY') {
       if (busy || !current || !result || typeof data.screenId !== 'string')
         throw new Error('Import a capture before checking it.');
       const index = current.screens.findIndex((s) => s.id === data.screenId);

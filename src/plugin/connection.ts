@@ -1,6 +1,8 @@
 /** The personalized main bundle shares its installation credential only with its UI. */
 export const installedPairingKey = () => '__HLA_LOCAL_PAIRING_KEY__';
+declare const __DIAGNOSTICS__: boolean | undefined;
 export function installedVerificationUrl() {
+  if (typeof __DIAGNOSTICS__ === 'undefined' || !__DIAGNOSTICS__) return '';
   const value = '__HLA_VERIFICATION_URL__';
   return /^(https?|fixture)%3A/i.test(value) ? decodeURIComponent(value) : '';
 }

@@ -112,14 +112,14 @@ test('a human verification interstitial fails instead of importing it as the req
   );
 });
 
-test('same-length changing text is not mistaken for a stable page', async () => {
-  await assert.rejects(
-    captureHtml(
-      '<body><p id="ticker" style="font-family:monospace">AAAA</p><script>let phase=false;setInterval(()=>{document.getElementById("ticker").textContent=(phase=!phase)?"BBBB":"AAAA"},180)</script></body>',
-      { widths: [390] },
-    ),
-    /لم يستقر|تغيّر/,
+test('same-length changing text is detected and frozen at one consistent frame', async () => {
+  const scene = await captureHtml(
+    '<body><p id="ticker" style="font-family:monospace">AAAA</p><script>let phase=false;setInterval(()=>{document.getElementById("ticker").textContent=(phase=!phase)?"BBBB":"AAAA"},180)</script></body>',
+    { widths: [390] },
   );
+  assert.ok(scene.issues.some((issue) => issue.code === 'motion-frozen'));
+  const ticker = flatten(scene.screens[0]!.root).find((n) => n.source.key === 'ticker')!;
+  assert.match(ticker.text!.characters, /^(AAAA|BBBB)$/);
 });
 
 test('a page containing only a text control is meaningful and password text is masked', async () => {

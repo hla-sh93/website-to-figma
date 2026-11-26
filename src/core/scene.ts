@@ -1,5 +1,9 @@
 import type { ImageSpec } from './image.js';
 export const SCHEMA_VERSION = 1 as const;
+/** Package-wide limits (all screens together). */
+export const MAX_NODES = 40000;
+export const MAX_DEPTH = 160;
+export const MAX_ENCODED_BYTES = 80 * 1024 * 1024;
 export type TextDecoration = 'none' | 'underline' | 'strikethrough';
 export type FontUsage = {
   family: string;
@@ -18,20 +22,48 @@ export type Layout = {
   justify: 'start' | 'center' | 'end' | 'space-between';
   wrap: boolean;
   columns?: number;
+  /** Measured grid column widths in pixels, one per column. */
+  tracks?: number[];
+  /** Authored intent: this flex item takes the free space of its row (flex-grow). */
+  grow?: boolean;
+  /** Authored intent: this item is stretched to its container's cross size. */
+  stretch?: boolean;
   widthSizing: 'fixed' | 'fill' | 'hug';
   heightSizing: 'fixed' | 'fill' | 'hug';
   minWidth?: number;
   maxWidth?: number;
 };
+export type TextCase = 'upper' | 'lower' | 'title';
+export type Shadow = {
+  color: RGBA;
+  x: number;
+  y: number;
+  blur: number;
+  spread: number;
+  inset?: boolean;
+};
+export type GradientStop = { position: number; color: RGBA };
+/** CSS gradient geometry resolved in the element's border box (unit coordinates). */
+export type Gradient = {
+  kind: 'linear' | 'radial' | 'conic';
+  /** Linear: start/end points. Radial/conic: center and radii (unit space). */
+  from: [number, number];
+  to: [number, number];
+  radius?: [number, number];
+  angle?: number;
+  stops: GradientStop[];
+};
 export type TextRun = {
   start: number;
   end: number;
+  textCase?: TextCase;
   fontFamily?: string;
   fontStyle?: string;
   fontWeight?: number;
   fontSize?: number;
   color?: RGBA;
   resolvedFontFamily?: string;
+  resolvedFontStyle?: string;
   variationSettings?: Record<string, number>;
   textDecoration?: TextDecoration;
   letterSpacing?: number;
@@ -50,10 +82,20 @@ export type TextSpec = {
   direction: 'ltr' | 'rtl';
   sizing?: 'inline' | 'block';
   maxLines?: number;
+  /** Lines the browser laid the copy out on. */
+  lines?: number;
+  /** Offsets in `characters` where the browser started each line after the first. */
+  breaks?: number[];
+  /** The breaks are a choice the width does not explain (balanced lines): keep them. */
+  keepBreaks?: boolean;
   resolvedFontFamily?: string;
+  /** The style name of the installed face that drew the text, when its file is known. */
+  resolvedFontStyle?: string;
   fontUsage?: FontUsage[];
   variationSettings?: Record<string, number>;
   textDecoration?: TextDecoration;
+  textCase?: TextCase;
+  shadow?: Shadow[];
   runs?: TextRun[];
 };
 export type SceneNode = {
@@ -64,12 +106,28 @@ export type SceneNode = {
   bounds: Bounds;
   style: {
     background?: RGBA;
-    border?: { color: RGBA; width: number };
+    /** Paint layers above the background colour, CSS order (first is topmost). */
+    gradients?: Gradient[];
+    border?: {
+      color: RGBA;
+      width: number;
+      /** Per-side widths [top, right, bottom, left] when sides differ. */
+      sides?: [number, number, number, number];
+      dash?: 'dashed' | 'dotted';
+    };
     radius?: [number, number, number, number];
     opacity: number;
     zIndex?: number;
     clipContent?: boolean;
-    shadow?: { color: RGBA; x: number; y: number; blur: number; spread: number }[];
+    shadow?: Shadow[];
+    blur?: number;
+    /** CSS colour filters applied to images inside this box (Figma image filters, -1..1). */
+    imageFilters?: { saturation?: number; contrast?: number; exposure?: number };
+    backdropBlur?: number;
+    /** Degrees clockwise around the centre of bounds; bounds stay the axis-aligned box. */
+    rotation?: number;
+    /** Untransformed size used with rotation. */
+    size?: { width: number; height: number };
   };
   layout?: Layout;
   text?: TextSpec;
@@ -113,7 +171,12 @@ export type ScenePackage = {
   screens: SceneScreen[];
   assets: SceneAsset[];
   issues: SceneIssue[];
+  /** The page's web fonts, saved on this computer as installable files. */
+  siteFonts?: { folder: string; files: { family: string; style: string; file: string }[] };
+  /** Design tokens the page declares as CSS custom properties. */
+  tokens?: { colors: ColorToken[] };
 };
+export type ColorToken = { name: string; value: RGBA };
 type Obj = Record<string, any>;
 const fail = (path: string): never => {
   throw new Error(`Invalid scene: ${path}`);
@@ -164,11 +227,11 @@ function json(
   depth: number,
   budget: { count: number; strings: number },
 ): void {
-  if (++budget.count > 500000 || depth > 260) fail('JSON input exceeds structural limits');
+  if (++budget.count > 2000000 || depth > 400) fail('JSON input exceeds structural limits');
   if (v === null || typeof v === 'boolean') return;
   if (typeof v === 'string') {
     budget.strings += v.length;
-    if (budget.strings > 40 * 1024 * 1024) fail('JSON strings exceed limit');
+    if (budget.strings > 96 * 1024 * 1024) fail('JSON strings exceed limit');
     return;
   }
   if (typeof v === 'number') {
@@ -212,11 +275,11 @@ export function validateScene(input: unknown): ScenePackage {
     str(v, p);
     const x = v as string;
     encoded += x.length;
-    if (encoded > 32 * 1024 * 1024) fail('encoded data exceeds 32 MiB');
+    if (encoded > MAX_ENCODED_BYTES) fail('encoded data exceeds 80 MiB');
     if (x.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(x)) fail(p + ' must be raw base64');
   };
   const assets = new Map<string, string>();
-  for (const [i, v] of arr(s.assets, 'assets', 300).entries()) {
+  for (const [i, v] of arr(s.assets, 'assets', 1500).entries()) {
     const p = `assets[${i}]`,
       a = obj(v, p);
     str(a.id, p + '.id');
@@ -233,7 +296,9 @@ export function validateScene(input: unknown): ScenePackage {
   const screens = new Map<string, Set<string>>();
   const fontProperties = (o: Obj, p: string) => {
     optional(o, 'resolvedFontFamily', str, p);
+    optional(o, 'resolvedFontStyle', str, p);
     optional(o, 'textDecoration', (v, q) => en(v, q, ['none', 'underline', 'strikethrough']), p);
+    optional(o, 'textCase', (v, q) => en(v, q, ['upper', 'lower', 'title']), p);
     optional(
       o,
       'variationSettings',
@@ -248,6 +313,33 @@ export function validateScene(input: unknown): ScenePackage {
       p,
     );
   };
+  const shadows = (v: unknown, q: string) => {
+    for (const v0 of arr(v, q, 100)) {
+      const sh = obj(v0, q);
+      color(sh.color, q + '.color');
+      for (const k of ['x', 'y', 'spread']) num(sh[k], q + '.' + k);
+      num(sh.blur, q + '.blur', 0);
+      optional(sh, 'inset', bool, q);
+    }
+  };
+  const point = (v: unknown, q: string) => tuple(v, q, 2);
+  const gradients = (v: unknown, q: string) => {
+    for (const g0 of arr(v, q, 16)) {
+      const g = obj(g0, q);
+      en(g.kind, q + '.kind', ['linear', 'radial', 'conic']);
+      point(g.from, q + '.from');
+      point(g.to, q + '.to');
+      optional(g, 'radius', (x, y) => tuple(x, y, 2, 0), q);
+      optional(g, 'angle', num, q);
+      const stops = arr(g.stops, q + '.stops', 64);
+      if (stops.length < 2) fail(q + '.stops needs two stops');
+      for (const s0 of stops) {
+        const stop = obj(s0, q + '.stops');
+        num(stop.position, q + '.stops.position', 0, 1);
+        color(stop.color, q + '.stops.color');
+      }
+    }
+  };
   const text = (v: unknown, p: string) => {
     const t = obj(v, p);
     for (const k of ['characters', 'fontFamily', 'fontStyle']) str(t[k], p + '.' + k);
@@ -260,7 +352,18 @@ export function validateScene(input: unknown): ScenePackage {
     en(t.direction, p + '.direction', ['ltr', 'rtl']);
     optional(t, 'sizing', (v, q) => en(v, q, ['inline', 'block']), p);
     optional(t, 'maxLines', (v, q) => integer(v, q, 1, 1000), p);
+    optional(t, 'lines', (v, q) => integer(v, q, 1, 100000), p);
+    optional(t, 'keepBreaks', bool, p);
+    optional(
+      t,
+      'breaks',
+      (v, q) => {
+        for (const offset of arr(v, q, 2000)) integer(offset, q, 1, 100000);
+      },
+      p,
+    );
     fontProperties(t, p);
+    optional(t, 'shadow', shadows, p);
     optional(
       t,
       'fontUsage',
@@ -296,7 +399,7 @@ export function validateScene(input: unknown): ScenePackage {
     );
   };
   const node = (v: unknown, p: string, ids: Set<string>, depth: number): void => {
-    if (depth > 80 || ++count > 12000) fail('node count or depth exceeds limit');
+    if (depth > MAX_DEPTH || ++count > MAX_NODES) fail('node count or depth exceeds limit');
     const n = obj(v, p);
     str(n.id, p + '.id');
     if (ids.has(n.id)) fail(p + ' duplicate node id');
@@ -321,24 +424,38 @@ export function validateScene(input: unknown): ScenePackage {
         const b = obj(v, q);
         color(b.color, q + '.color');
         num(b.width, q + '.width', 0);
+        optional(b, 'sides', (x, y) => tuple(x, y, 4, 0), q);
+        optional(b, 'dash', (x, y) => en(x, y, ['dashed', 'dotted']), q);
+      },
+      p + '.style',
+    );
+    optional(st, 'gradients', gradients, p + '.style');
+    optional(st, 'blur', (x, y) => num(x, y, 0, 1000), p + '.style');
+    optional(
+      st,
+      'imageFilters',
+      (v, q) => {
+        const f = obj(v, q);
+        for (const k of ['saturation', 'contrast', 'exposure'])
+          optional(f, k, (x, y) => num(x, y, -1, 1), q);
+      },
+      p + '.style',
+    );
+    optional(st, 'backdropBlur', (x, y) => num(x, y, 0, 1000), p + '.style');
+    optional(st, 'rotation', (x, y) => num(x, y, -360, 360), p + '.style');
+    optional(
+      st,
+      'size',
+      (x, y) => {
+        const size = obj(x, y);
+        num(size.width, y + '.width', 0);
+        num(size.height, y + '.height', 0);
       },
       p + '.style',
     );
     optional(st, 'radius', (v, q) => tuple(v, q, 4, 0), p + '.style');
     optional(st, 'clipContent', bool, p + '.style');
-    optional(
-      st,
-      'shadow',
-      (v, q) => {
-        for (const v0 of arr(v, q, 100)) {
-          const sh = obj(v0, q);
-          color(sh.color, q + '.color');
-          for (const k of ['x', 'y', 'spread']) num(sh[k], q + '.' + k);
-          num(sh.blur, q + '.blur', 0);
-        }
-      },
-      p + '.style',
-    );
+    optional(st, 'shadow', shadows, p + '.style');
     optional(
       n,
       'layout',
@@ -352,6 +469,17 @@ export function validateScene(input: unknown): ScenePackage {
         en(l.justify, q + '.justify', ['start', 'center', 'end', 'space-between']);
         bool(l.wrap, q + '.wrap');
         optional(l, 'columns', (x, y) => integer(x, y, 1), q);
+        optional(
+          l,
+          'tracks',
+          (x, y) => {
+            if (!Array.isArray(x) || x.length > 64) fail(y + ' must be a short array');
+            (x as unknown[]).forEach((value, i) => num(value, y + '[' + i + ']', 0));
+          },
+          q,
+        );
+        optional(l, 'grow', bool, q);
+        optional(l, 'stretch', bool, q);
         for (const k of ['widthSizing', 'heightSizing'])
           en(l[k], q + '.' + k, ['fixed', 'fill', 'hug']);
         for (const k of ['minWidth', 'maxWidth']) optional(l, k, (x, y) => num(x, y, 0), q);
@@ -402,7 +530,7 @@ export function validateScene(input: unknown): ScenePackage {
       p,
     );
     optional(n, 'position', (v, q) => en(v, q, ['flow', 'absolute']), p);
-    arr(n.children, p + '.children', 12000).forEach((c, i) =>
+    arr(n.children, p + '.children', MAX_NODES).forEach((c, i) =>
       node(c, `${p}.children[${i}]`, ids, depth + 1),
     );
   };
@@ -430,6 +558,38 @@ export function validateScene(input: unknown): ScenePackage {
     );
     node(screen.root, p + '.root', ids, 1);
   }
+  optional(
+    s,
+    'siteFonts',
+    (v, p) => {
+      const fonts = obj(v, p);
+      str(fonts.folder, p + '.folder');
+      if (fonts.folder.length > 400) fail(p + '.folder is too long');
+      for (const [i, f] of arr(fonts.files, p + '.files', 60).entries()) {
+        const q = `${p}.files[${i}]`,
+          file = obj(f, q);
+        for (const k of ['family', 'style', 'file']) {
+          str(file[k], q + '.' + k);
+          if (!file[k] || file[k].length > 120) fail(q + '.' + k + ' must be 1 to 120 characters');
+        }
+      }
+    },
+    'scene',
+  );
+  optional(
+    s,
+    'tokens',
+    (v, p) => {
+      for (const [i, t] of arr(obj(v, p).colors, p + '.colors', 400).entries()) {
+        const q = `${p}.colors[${i}]`,
+          token = obj(t, q);
+        str(token.name, q + '.name');
+        if (!token.name || token.name.length > 80) fail(q + '.name must be 1 to 80 characters');
+        color(token.value, q + '.value');
+      }
+    },
+    'scene',
+  );
   for (const [i, v] of arr(s.issues, 'issues', 5000).entries()) {
     const p = `issues[${i}]`,
       issue = obj(v, p);

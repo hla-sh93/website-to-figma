@@ -1,5 +1,8 @@
 import { validateScene, type ScenePackage } from '../core/scene.js';
 import { createRequestKey } from './request-key.js';
+import { arabicError } from './messages.js';
+import { collectFontRequests } from './fonts.js';
+declare const __DIAGNOSTICS__: boolean;
 import type { RenderResult } from './renderer.js';
 import {
   connectLocalService,
@@ -25,6 +28,7 @@ const verificationUrl = installedVerificationUrl();
 const ownedVerification = ['fixture:reference', 'fixture:features'].includes(verificationUrl);
 let bridgeEvents = 0;
 function report(stage: string, data: object = {}) {
+  if (!__DIAGNOSTICS__) return;
   void fetch('http://localhost:4017/plugin-verification', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Plugin-Pairing': installedPairingKey() },
@@ -44,8 +48,9 @@ function setBusy(value: boolean) {
   $('submit').textContent = value ? 'جارٍ النسخ…' : 'نسخ إلى Figma';
   if (!value) phase = 'idle';
 }
-function finishError(message: string) {
-  report('error', { phase, message: message.replaceAll(installedPairingKey(), '[private]') });
+function finishError(raw: string) {
+  const message = arabicError(raw);
+  report('error', { phase, message: raw.replaceAll(installedPairingKey(), '[private]') });
   setBusy(false);
   $('font-note').hidden = true;
   status(message, true);
@@ -101,11 +106,21 @@ async function api(path: string, options: RequestInit = {}, retry = true): Promi
     );
   return data;
 }
+/** The address as typed or pasted, with https:// added when it has no scheme. */
+function enteredUrl(): string {
+  const value = $<HTMLInputElement>('url').value.trim();
+  return /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : value ? 'https://' + value : '';
+}
 function validUrl() {
   if (ownedVerification) return true;
   try {
-    const url = new URL($<HTMLInputElement>('url').value.trim());
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    const url = new URL(enteredUrl());
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      (url.hostname.includes('.') || url.hostname.includes(':'))
+    );
   } catch {
     return false;
   }
@@ -125,7 +140,7 @@ async function capture() {
   clearTimeout(pasteTimer);
   pasteTimer = undefined;
   if (!validUrl()) {
-    status('الصقي رابط موقع يبدأ بـ https:// أو http://', true);
+    status('الصقي رابط الموقع، مثل example.com أو https://example.com', true);
     return;
   }
   const requestId = ++generation;
@@ -157,8 +172,13 @@ async function capture() {
               demo: true,
               ...(verificationUrl === 'fixture:features' ? { selector: '#features' } : {}),
             }
-          : { url: $<HTMLInputElement>('url').value.trim() }),
-        widths: size === 'all' ? [1440, 768, 390] : [Number(size)],
+          : { url: enteredUrl() }),
+        widths:
+          size === 'all'
+            ? [1440, 768, 390]
+            : size === 'desktop-mobile'
+              ? [1440, 390]
+              : [Number(size)],
         theme: select('theme').value,
         ...(language === 'original' ? {} : { language }),
       }),
@@ -173,11 +193,10 @@ async function capture() {
       const state = await api('/jobs/' + jobId);
       if (requestId !== generation) return;
       if (state.state === 'ready') {
-        const value = await api('/jobs/' + jobId + '/scene');
+        // Screenshots are only needed by the comparison tools, never by the editor.
+        const value = await api('/jobs/' + jobId + '/scene?screenshots=0');
         if (requestId !== generation) return;
         scene = validateScene(value);
-        if (/^https:\/\/www\.amazon\.co\.uk\/?$/.test(verificationUrl))
-          scene.capture.title = 'Home / Amazon';
         report('capture-ready', {
           jobId,
           title: scene.capture.title,
@@ -185,7 +204,7 @@ async function capture() {
         });
         phase = 'fonts';
         status('جارٍ تجهيز الخطوط…');
-        send('PREFLIGHT', { scene, fallback: 'Inter', requestId });
+        send('PREFLIGHT', { fonts: collectFontRequests(scene), fallback: 'Inter', requestId });
         return;
       }
       if (state.state === 'failed' || state.state === 'cancelled')
@@ -302,7 +321,7 @@ window.onmessage = async (event: MessageEvent) => {
     report('native-functional', data.report);
     return;
   }
-  if (bridgeEvents++ < 24)
+  if (__DIAGNOSTICS__ && bridgeEvents++ < 24)
     report('bridge-message', {
       kind: data.type,
       source:
@@ -316,9 +335,10 @@ window.onmessage = async (event: MessageEvent) => {
       accepted: data.__channel === installedPairingKey(),
     });
   if (data.__channel !== installedPairingKey()) return;
-  if (data.type === 'NATIVE_PREVIEW') {
+  if (__DIAGNOSTICS__ && data.type === 'NATIVE_PREVIEW') {
     report('native-preview', {
       png: data.png,
+      screenId: data.screenId,
       nodeId: data.nodeId,
       pageId: data.pageId,
       nodes: data.nodes,
@@ -346,7 +366,7 @@ window.onmessage = async (event: MessageEvent) => {
   }
   if (data.type === 'PREFLIGHT_RESULT' && phase === 'fonts') {
     if (data.missing.length) {
-      if (verificationUrl) {
+      if (__DIAGNOSTICS__ && verificationUrl) {
         report('verification-substitution', { count: data.missing.length });
         insert(true);
         return;
@@ -354,8 +374,28 @@ window.onmessage = async (event: MessageEvent) => {
       report('missing-fonts', { count: data.missing.length });
       $('font-note').hidden = false;
       $('progress').hidden = true;
-      $('font-message').textContent =
-        'خط الموقع غير متوفر في Figma. ثبّتيه للحفاظ على النص، أو اختاري المتابعة بخط بديل.';
+      // Which fonts are missing, and whether the site's own files were saved for them.
+      const same = (x: string, y: string) =>
+        x.toLowerCase().replace(/[\s_-]/g, '') === y.toLowerCase().replace(/[\s_-]/g, '');
+      const families = [
+        ...new Set(
+          (data.missing as { family?: string; requested: string }[]).map(
+            (font) => font.family ?? font.requested,
+          ),
+        ),
+      ].slice(0, 8);
+      const saved = scene?.siteFonts;
+      const hasFiles =
+        !!saved && families.some((family) => saved.files.some((file) => same(file.family, family)));
+      $('font-message').textContent = [
+        'خطوط غير متوفرة في Figma: ' + families.join('، ') + '.',
+        hasFiles
+          ? 'حُفظت ملفات هذه الخطوط من الموقع في المجلد أدناه. ثبّتيها إن كان لديك حق استخدامها، ثم أعيدي تشغيل Figma وأعيدي النسخ.'
+          : 'ثبّتيها للحصول على تطابق كامل.',
+        'أو تابعي بخط بديل: تبقى الأسطر كما كسرها المتصفح، ويختلف شكل الحروف فقط.',
+      ].join('\n');
+      $('font-folder').textContent = hasFiles ? saved.folder : '';
+      $('font-folder').hidden = !hasFiles;
       status('بانتظار الخط المطلوب.');
     } else insert();
     return;
@@ -371,7 +411,7 @@ window.onmessage = async (event: MessageEvent) => {
       screenIds: data.result.screenIds,
       issues: data.result.issues,
     });
-    if (verificationUrl) send('VERIFY_PREVIEW', { requestId: generation });
+    if (__DIAGNOSTICS__ && verificationUrl) send('VERIFY_PREVIEW', { requestId: generation });
     const needsReview = showNotes(data.result);
     setBusy(false);
     status(
@@ -386,9 +426,9 @@ window.onmessage = async (event: MessageEvent) => {
 send('READY');
 report('ui-boot', { verification: Boolean(verificationUrl) });
 void ensureConnection();
-if (verificationUrl) {
+if (__DIAGNOSTICS__ && verificationUrl) {
   touched = true;
-  select('size').value = '1440';
+  select('size').value = ownedVerification ? '1440' : 'desktop-mobile';
   select('theme').value = 'light';
   select('language').value = 'original';
   const input = $<HTMLInputElement>('url');

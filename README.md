@@ -1,14 +1,45 @@
 # Website to Figma
 
-**By Hla.Sh · Development build 0.3.0-alpha.5-debug**
+**By Hla.Sh · 0.4.0-alpha.1**
 
-The current review build repairs long-page crop validation, retained-job exhaustion, unboxed text, live control values, preformatted text and CSS-painted SVG. It adds access-gate/stability checks and explicit warnings for incomplete inline/grid behavior. Full native visual acceptance remains open; the existing Figma validation file is currently view-only. See the [full review and actual test results](tasks/full-review.md) and [product quality plan](tasks/product-quality-plan.md). This is a diagnostic development build, not a completed fidelity release.
+Paste a public website URL and get editable Figma layers: frames with auto layout, real text, images, gradients, borders, shadows and effects, with layer names that describe what each element is. A local Playwright service measures the page in Chromium; the Figma plugin rebuilds it natively.
 
-Paste a public website URL and create editable Figma layers. The everyday interface has the URL field and three dropdowns: size, source appearance and website language. Pasting a valid URL starts capture and import automatically after a short pause. A single button also supports typed URLs.
+## What's new in 0.4
 
-Size options are Desktop 1440, Tablet 768, Mobile 390 and all three. Settings are remembered. Language selects the browser's Arabic/English preference; it does not translate text or guarantee that a site provides that language. Light/Dark selects the website's preferred color scheme where supported.
+**Faster**
+- Original JPEG, PNG and GIF bytes are kept; only other formats, EXIF-rotated or very large images are re-encoded.
+- The editor receives the scene once, without screenshots, and the font check sends only the font list.
+- Widths are captured in parallel; the renderer yields to Figma, so large imports keep the editor responsive.
+- Apple home at 1440: 3.1 MB editor payload instead of 18.7 MB sent twice.
 
-Fonts are checked before insertion. Available fonts proceed automatically; missing fonts pause for an explicit substitute choice. Cancellation is available during work. Accuracy notes appear only when there are limitations to review. The previous demo, offline-file and comparison controls have been removed from the everyday plugin interface; capture and comparison remain available through the local dashboard/CLI.
+**More solid**
+- Request, image and network limits skip extra downloads instead of failing the capture; over-budget regions become images.
+- Pages that keep moving are frozen at one frame (Stripe now captures).
+- After scrolling, capture waits for every image to finish, so slow sites keep their photos.
+- The shipped plugin excludes verification hooks; a separate diagnostic build keeps them.
+
+**More accurate**
+- Linear, radial and conic gradients, gradient text and overlays on photos.
+- Per-side, dashed and dotted borders; multiple and inset shadows; text shadow; blur and backdrop blur.
+- `::before` / `::after` boxes and inline glyphs, CSS rotation, text case.
+- CSS colour filters (grayscale, saturate, contrast, brightness) become Figma image filters; icon fonts become icon images.
+- Right-to-left pages keep auto layout: rows, grids and columns follow browser order and alignment, and mixed Arabic and Latin copy keeps its order.
+- Text uses line boxes, grids keep every CSS track, boxes stretched by their container keep their height, and only shrink-wrapped boxes (buttons, links, chips, badges) hug their content.
+- SVG icons are imported at their measured size, so strokes scale correctly.
+
+**Ready to design with**
+- Layers are named by role and content (`Header`, `Navigation`, `Card / product title`, `Link / label`, `Button / label`, `Icon`, `Grid`, `Section / heading`). Utility classes and generated names are replaced; author labels and descriptive class names are kept.
+- Each import is one Figma section named after the site, with every screen as a top-level frame, ready to export or prototype.
+
+## Using the plugin
+
+The interface has a URL field and three settings:
+
+- **Size:** Desktop 1440, Tablet 768, Mobile 390, Desktop + Mobile, or all three.
+- **Appearance:** Light or Dark, the colour scheme the website is asked to use where it supports one.
+- **Website language:** Original, Arabic or English, the browser's language preference. It does not translate text or guarantee that a site has that language.
+
+Pasting a valid URL starts capture and import after a short pause; the button also works for typed URLs. Settings are remembered. Fonts are checked first: available fonts continue automatically, missing fonts pause for an explicit substitute choice. Accuracy notes appear only when something needs review, and the import can be cancelled while it runs.
 
 ## Local setup
 
@@ -19,9 +50,9 @@ Requirements: Node.js 24 recommended (22 minimum), npm, Chromium or Google Chrom
        npm ci
        npx playwright install chromium
 
-   The service can also use Chrome's standard Windows installation, or CHROMIUM_EXECUTABLE_PATH.
+   The service can also use Chrome's standard Windows installation, or `CHROMIUM_EXECUTABLE_PATH`.
 
-2. Create a development plugin in Figma Desktop. Configure the ID that Figma assigned to that registration:
+2. Create a development plugin in Figma Desktop and configure the ID Figma assigned to it:
 
        npm run configure-plugin -- --id YOUR_FIGMA_PLUGIN_ID
        npm run build
@@ -30,39 +61,35 @@ Requirements: Node.js 24 recommended (22 minimum), npm, Chromium or Google Chrom
 
        npm run install-local -- --target "C:/path/to/your/registered/plugin"
 
-   The registered manifest must have the same Figma-assigned ID. Installation backs up its three runtime files, verifies deployed bytes and pairs that copy with this local service. It does not publish the plugin. See [Figma's manifest documentation](https://developers.figma.com/docs/plugins/manifest/).
+   The registered manifest must have the same Figma-assigned ID. Installation backs up the three runtime files (`manifest.json`, `code.js`, `ui.html`), personalizes `code.js` and `ui.html` with the local pairing key and verifies the deployed bytes. It does not publish the plugin. See [Figma's manifest documentation](https://developers.figma.com/docs/plugins/manifest/).
 
-4. Start the service:
+4. Start the service and keep it running while importing:
 
        npm run dev
 
-   Keep it running while importing. The personalized plugin connects automatically; no daily session-code entry is needed.
+5. Open **Website to Figma · Hla.Sh** from Plugins > Development, choose the settings and paste the URL. If the plugin was open while its files changed, close and reopen it.
 
-5. Open Website to Figma · Hla.Sh from Plugins > Development. Choose settings, then paste the URL. If the plugin was already open while files changed, close and reopen it.
+Generic `dist/` files and release archives contain a pairing placeholder; only the registered copy is personalized. The private device key stays in the ignored `.data/plugin-key` and is reused after service restarts. The service listens on `http://localhost:4017`, accepts loopback requests only and requires authentication.
 
-Generic dist/code.js and release archives contain a pairing placeholder. install-local personalizes only the registered copy. The private device key stays in ignored .data/plugin-key and is reused after service restarts; temporary session credentials are not stored in Figma preferences. The local dashboard is available at http://localhost:4017 for development diagnostics and owned-demo capture. Service requests remain loopback-only and authenticated.
+## Commands
 
-## Validation and commands
-
-    npm run check
-    npm run capture -- --url https://example.com --out output/example.json --widths 1440,390
+    npm run check          # formatting, TypeScript, unit/API tests, build, Chromium tests
+    npm run capture -- --url https://example.com --widths 1440,390 --out output/example.json
     npm run capture -- --fixture fixtures/reference.html --selector "#features" --out output/features.json
     npm run benchmark
-    npm run benchmark -- --source source.png --rendered figma.png --out output/comparison
 
-Latest local verification: 60 unit/API tests and 37 Chromium tests, formatting, TypeScript and build. Browser workflow tests run the compiled UI inside an opaque sandbox iframe without form permissions or randomUUID, including synthetic null/self message sources. Actual Figma Desktop results and failures are recorded separately in [tasks/current-verification.md](tasks/current-verification.md). `npx tsx scripts/review-public-sites.ts` saves a separate source-only public-page exercise report; it does not establish native fidelity.
+`npm run build` writes the shipped plugin to `dist/` and a diagnostic build to `dist/diagnostic/`. Installing with `--verify-url https://…` deploys the diagnostic build: it imports that URL automatically and sends an export of every imported screen, with per-layer geometry, to the local service for comparison with the live page.
 
-Actual Desktop replies used a window source different from parent. The earlier source guard rejected those replies despite successful external HTTP checks. The UI now connects directly and authenticates host messages with its personalized private channel. Real normal-mode URL paste created all three Figma frames without substitution. A separate actual Amazon test imported 89 images but failed visual acceptance; successful layer creation does not establish a match.
+Latest verification: 80 unit/API tests and 53 Chromium tests pass. Two Arabic stores were imported in Figma Desktop at 1440 and 390 and compared with the live sites screenshot to screenshot and layer by layer; results are in [tasks/v0.4-results.md](tasks/v0.4-results.md).
 
-## Current support and limits
+## Limits
 
-- Public HTTP(S) capture, real viewport measurements, bounded scrolling and original image assets.
-- Editable styled text, measured font evidence, underline/strikethrough, supported variable-font axes and RTL alignment.
-- Common Auto Layout flow, simple grid, fill/hug sizing, width limits, local styles, bound variables and conservative component families.
-- Five image fit modes, padding and crop position; custom crops use editable clipping frames and need review after resize.
-- Separate captured viewport frames preserve observed structure changes. Exact CSS breakpoint recovery and automatic structural switching in Design are not promised.
+- Rotated containers keep their children's measured positions; rotation is native on leaf layers only.
+- Repeating or sized gradients are drawn once across the box; different border colours per side use one stroke colour.
+- Browser and Figma glyph metrics differ slightly (emoji in particular), and unavailable fonts change wrapping.
+- Moving content is captured at one frame; carousels show whichever slide was active.
+- Text styles and variables are kept per site and reused by later imports of that site; colours take the names of the page's CSS custom properties when it declares them. Tokens overridden inside a section (a dark block, for example) keep the root value's name only where the colour matches.
+- Exact CSS breakpoints are not recovered: each captured width is a separate frame.
+- Private pages, production hosting and publishing to the Figma Community are out of scope.
 
-Some gradients, pseudo content, filters, media, transforms and complex layouts remain unsupported or approximate. Browser/Figma typography and unavailable fonts can change wrapping. The image model's 30 sampled browser pixels agree with its owned fixture; this is not a native-Figma visual accuracy score. Universal 100% website matching is not claimed.
-
-The full roadmap remains open in [tasks/plan.md](tasks/plan.md). Production hosting, private-page capture, broad fixture evaluation and human cleanup studies are future work. Earlier 0.1 native evidence and the pending 0.2 native crop/component reruns remain documented; green local checks do not replace them.
-
+Universal 100% website matching is not claimed; check each import against its source.

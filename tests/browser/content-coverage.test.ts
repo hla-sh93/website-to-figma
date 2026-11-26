@@ -13,7 +13,11 @@ test('visible images survive zero-size and display-contents ancestors', async ()
     `<body><section style="position:relative;height:100px"><picture style="display:contents"><img src="${image}" width="120" height="80"></picture></section><section style="position:relative;height:100px"><span style="display:block;width:0;height:0"><img style="position:absolute;left:20px;top:0" src="${image}" width="120" height="80"></span></section></body>`,
     { widths: [390] },
   );
-  assert.equal(flatten(scene.screens[0]!.root).filter((n) => n.kind === 'image').length, 2);
+  // Small SVG files are kept as vectors; either way both pictures must survive.
+  assert.equal(
+    flatten(scene.screens[0]!.root).filter((n) => n.kind === 'image' || n.kind === 'svg').length,
+    2,
+  );
 });
 test('a visible video poster is retained as a disclosed static media image', async () => {
   const scene = await captureHtml(
