@@ -540,18 +540,29 @@ export async function renderScene(
     const key = colorKey(c);
     let variable = colors.get(key);
     let name = `color/${tokenNames.get(key) ?? colorName(c)}`;
-    const before = knownValue(name) as Partial<RGBA> | undefined;
-    if (!variable && before) {
-      const same =
+    // Figma stores colours as 32-bit floats and refuses a second variable with the
+    // same name, so a stored colour is the same when no channel differs by a full
+    // 8-bit step.
+    const same = (candidate: string) => {
+      const before = knownValue(candidate) as Partial<RGBA> | undefined;
+      return (
+        !!before &&
         typeof before.r === 'number' &&
-        colorKey({ r: before.r, g: before.g!, b: before.b!, a: before.a ?? 1 }) === key;
-      if (same) {
-        variable = known.get(name)!;
-        colors.set(key, variable);
-      } else if (tokenNames.has(key)) name += ` ${colorName(c)}`; // the site changed this token
+        [before.r - c.r, before.g! - c.g, before.b! - c.b, (before.a ?? 1) - c.a].every(
+          (d) => Math.abs(d) < 0.003,
+        )
+      );
+    };
+    if (!variable && known.has(name) && !same(name)) name += ` ${colorName(c)}`; // the token changed
+    if (!variable && known.has(name) && same(name)) {
+      variable = known.get(name)!;
+      colors.set(key, variable);
     }
     if (!variable) {
+      const base = name;
+      for (let n = 2; known.has(name); n++) name = `${base} · ${n}`;
       variable = api.variables.createVariable(name, collection, 'COLOR');
+      known.set(name, variable);
       variable.scopes = ['FRAME_FILL', 'SHAPE_FILL', 'TEXT_FILL', 'STROKE_COLOR'];
       variable.setValueForMode(collection.defaultModeId, c);
       colors.set(key, variable);
@@ -588,12 +599,15 @@ export async function renderScene(
     node[field] = value;
     let variable = numbers.get(value);
     const name = `space/${String(value).replace('.', '_')}`;
-    if (!variable && knownValue(name) === value) {
+    // The name is the value, so a variable with this name is this number (Figma
+    // returns it as a 32-bit float, which need not compare equal).
+    if (!variable && typeof knownValue(name) === 'number') {
       variable = known.get(name)!;
       numbers.set(value, variable);
     }
     if (!variable) {
       variable = api.variables.createVariable(name, collection, 'FLOAT');
+      known.set(name, variable);
       variable.scopes = ['GAP', 'WIDTH_HEIGHT'];
       variable.setValueForMode(collection.defaultModeId, value);
       numbers.set(value, variable);
@@ -1364,10 +1378,16 @@ export async function renderScene(
             source.layout?.grow &&
             !huggers.has(parentSource.id) &&
             Math.abs(used - inner) <= 2 &&
-            parentLayout.justify !== 'space-between' &&
             growers.every((c) => Math.abs(c.bounds.width - source.bounds.width) <= 1)
           ) {
             try {
+              // Figma drops the gap of a spaced-out row once an item fills it; the row
+              // is full, so the measured gap from the start gives the same picture.
+              const row = native.parent as FrameNode;
+              if (row.primaryAxisAlignItems === 'SPACE_BETWEEN') {
+                row.primaryAxisAlignItems = 'MIN';
+                row.itemSpacing = parentLayout.gap;
+              }
               native.layoutSizingHorizontal = 'FILL';
             } catch {}
           }

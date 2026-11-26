@@ -63,3 +63,23 @@ export async function normalizeImage(input: Buffer): Promise<NormalizedImage> {
     flattened: pages > 1,
   };
 }
+
+/**
+ * Chromium occasionally returns a full-page screenshot made of one 512 px tile
+ * repeated across the page (seen when the machine is busy). A real page never
+ * equals itself shifted by exactly one tile while differing at half a tile.
+ */
+export async function isTiledScreenshot(png: Buffer): Promise<boolean> {
+  const { data, info } = await sharp(png).greyscale().raw().toBuffer({ resolveWithObject: true });
+  const width = info.width,
+    height = Math.min(info.height, 1600);
+  if (width < 1024) return false;
+  const differs = (shift: number) => {
+    let count = 0;
+    for (let y = 0; y < height; y += 3)
+      for (let x = 0; x < width - shift; x += 3)
+        if (data[y * width + x] !== data[y * width + x + shift]) count++;
+    return count;
+  };
+  return differs(512) === 0 && differs(256) > 0;
+}

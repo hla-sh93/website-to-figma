@@ -24,7 +24,7 @@ import { nameLayers } from '../core/naming.js';
 import { textLineBoxes } from '../core/text-box.js';
 import { inspectFonts } from './fonts.js';
 import { captureGate, freezePage, pageFingerprint } from './page-state.js';
-import { normalizeImage, MAX_ASSET_BYTES } from './images.js';
+import { normalizeImage, isTiledScreenshot, MAX_ASSET_BYTES } from './images.js';
 import { parseObjectPosition, backgroundSize, computeImagePlacement } from '../core/image.js';
 export type CaptureOptions = {
   widths?: number[];
@@ -984,12 +984,24 @@ async function capture(
           textLineBoxes(root);
           nameLayers(root);
           trace('sources processed');
-          const screenshot = await page.screenshot({
-            clip,
-            fullPage: true,
-            animations: 'allow',
-            timeout: 10000,
-          });
+          const shoot = () =>
+            page.screenshot({ clip, fullPage: true, animations: 'allow', timeout: 10000 });
+          let screenshot = await shoot();
+          // The layers are measured, not drawn from this picture; only the reference
+          // image is retaken when Chromium returns a repeated tile.
+          for (let retry = 0; retry < 2 && (await isTiledScreenshot(screenshot)); retry++) {
+            trace('screenshot came back tiled; retaking');
+            await page.waitForTimeout(400);
+            screenshot = await shoot();
+          }
+          if (await isTiledScreenshot(screenshot))
+            local.issues.push({
+              code: 'screenshot-unreliable',
+              severity: 'warning',
+              message:
+                'The reference screenshot could not be drawn correctly; the layers are not affected.',
+              screenId,
+            });
           if ((await fingerprint()) !== settledState)
             // The scene is one synchronous snapshot; only the reference screenshot may differ.
             local.issues.push({

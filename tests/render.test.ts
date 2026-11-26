@@ -788,6 +788,19 @@ test('authored grow and stretch become fill only where the picture stays the sam
           cell('side', 500, 100, 80, { layout: { ...flowLayout('vertical'), stretch: true } }),
         ],
       }),
+      node('spaced', {
+        position: 'flow',
+        bounds: { x: 0, y: 200, width: 600, height: 80 },
+        layout: flowLayout('horizontal', { justify: 'space-between', gap: 24 }),
+        children: [
+          node('wide', {
+            position: 'flow',
+            bounds: { x: 0, y: 200, width: 476, height: 80 },
+            layout: { ...flowLayout('vertical'), grow: true },
+          }),
+          node('icon', { position: 'flow', bounds: { x: 500, y: 200, width: 100, height: 80 } }),
+        ],
+      }),
       // The row is not full: free space would move the growing item.
       node('loose', {
         position: 'flow',
@@ -805,6 +818,10 @@ test('authored grow and stretch become fill only where the picture stays the sam
   );
   assert.equal(byId('search').layoutSizingHorizontal, 'FILL');
   assert.equal(byId('search').width, 380);
+  // A spaced-out row keeps its measured gap when an item fills it.
+  assert.equal(byId('spaced').primaryAxisAlignItems, 'MIN');
+  assert.equal(byId('spaced').itemSpacing, 24);
+  assert.equal(byId('wide').layoutSizingHorizontal, 'FILL');
   assert.equal(byId('side').layoutSizingVertical, 'FILL');
   assert.notEqual(byId('logo').layoutSizingHorizontal, 'FILL');
   assert.notEqual(byId('short').layoutSizingHorizontal, 'FILL');
@@ -852,6 +869,20 @@ test('text styles are named by use, and a second import reuses styles and colour
       label('copy', 'p', {}, 60),
       label('cta', 'button', { fontSize: 14, fontWeight: 600 }, 120),
       label('note', 'p', { fontSize: 11, lineHeight: 14 }, 180),
+      // Values that 32-bit floats do not hold exactly, and two colours one name fits.
+      node('gap', {
+        position: 'flow',
+        bounds: { x: 0, y: 240, width: 300, height: 40 },
+        style: { opacity: 1, background: { r: 0.2, g: 0.3, b: 0.7, a: 1 } },
+        layout: flowLayout('horizontal', { gap: 4.8, padding: [0.1, 0, 0, 0] }),
+        children: [
+          node('near', {
+            position: 'flow',
+            bounds: { x: 0, y: 240.1, width: 100, height: 39.9 },
+            style: { opacity: 1, background: { r: 0.2004, g: 0.3, b: 0.7, a: 1 } },
+          }),
+        ],
+      }),
     ]);
   assert.deepEqual([...textRoles(pkg()).values()], ['Heading', 'Body', 'Label', 'Caption']);
   const figma = createFakeFigma([

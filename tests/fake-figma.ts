@@ -174,6 +174,13 @@ export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }])
         return collection;
       },
       createVariable(name: string, collection: Any, type: string) {
+        // As in Figma: names are unique in a collection, numbers are 32-bit floats.
+        if (
+          variables.some(
+            (v) => !v.removed && v.variableCollectionId === collection.id && v.name === name,
+          )
+        )
+          throw new Error('in createVariable: duplicate variable name');
         const variable: Any = {
           id: `V:${variables.length + 1}`,
           name,
@@ -184,7 +191,13 @@ export function createFakeFigma(fonts = [{ family: 'Inter', style: 'Regular' }])
         };
         variable.setValueForMode = (mode: string, value: unknown) => {
           variable.value = value;
-          variable.valuesByMode[mode] = value;
+          const f = (x: number) => Math.fround(x);
+          variable.valuesByMode[mode] =
+            typeof value === 'number'
+              ? f(value)
+              : Object.fromEntries(
+                  Object.entries(value as Any).map(([k, x]) => [k, f(x as number)]),
+                );
         };
         variable.remove = () => (variable.removed = true);
         variables.push(variable);
