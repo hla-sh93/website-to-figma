@@ -1,5 +1,6 @@
 import { validateScene, type ScenePackage } from '../core/scene.js';
 import { createRequestKey } from './request-key.js';
+import { arabicError } from './messages.js';
 import { collectFontRequests } from './fonts.js';
 declare const __DIAGNOSTICS__: boolean;
 import type { RenderResult } from './renderer.js';
@@ -47,8 +48,9 @@ function setBusy(value: boolean) {
   $('submit').textContent = value ? 'جارٍ النسخ…' : 'نسخ إلى Figma';
   if (!value) phase = 'idle';
 }
-function finishError(message: string) {
-  report('error', { phase, message: message.replaceAll(installedPairingKey(), '[private]') });
+function finishError(raw: string) {
+  const message = arabicError(raw);
+  report('error', { phase, message: raw.replaceAll(installedPairingKey(), '[private]') });
   setBusy(false);
   $('font-note').hidden = true;
   status(message, true);
@@ -104,11 +106,21 @@ async function api(path: string, options: RequestInit = {}, retry = true): Promi
     );
   return data;
 }
+/** The address as typed or pasted, with https:// added when it has no scheme. */
+function enteredUrl(): string {
+  const value = $<HTMLInputElement>('url').value.trim();
+  return /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : value ? 'https://' + value : '';
+}
 function validUrl() {
   if (ownedVerification) return true;
   try {
-    const url = new URL($<HTMLInputElement>('url').value.trim());
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+    const url = new URL(enteredUrl());
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      (url.hostname.includes('.') || url.hostname.includes(':'))
+    );
   } catch {
     return false;
   }
@@ -128,7 +140,7 @@ async function capture() {
   clearTimeout(pasteTimer);
   pasteTimer = undefined;
   if (!validUrl()) {
-    status('الصقي رابط موقع يبدأ بـ https:// أو http://', true);
+    status('الصقي رابط الموقع، مثل example.com أو https://example.com', true);
     return;
   }
   const requestId = ++generation;
@@ -160,7 +172,7 @@ async function capture() {
               demo: true,
               ...(verificationUrl === 'fixture:features' ? { selector: '#features' } : {}),
             }
-          : { url: $<HTMLInputElement>('url').value.trim() }),
+          : { url: enteredUrl() }),
         widths:
           size === 'all'
             ? [1440, 768, 390]

@@ -37,6 +37,23 @@ export type CaptureOptions = {
 };
 const MAX_REQUESTS = 3000;
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+const UNREACHABLE =
+  /ERR_(EMPTY_RESPONSE|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|TIMED_OUT|CONNECTION_(REFUSED|RESET|CLOSED|ABORTED|FAILED|TIMED_OUT))/;
+/** example.com for www.example.com and the reverse; nothing for deeper hosts or IPs. */
+export function alternateAddress(input: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return;
+  }
+  const host = url.hostname;
+  if (!/[a-z]/i.test(host.split('.').at(-1) ?? '') || !host.includes('.')) return;
+  if (host.startsWith('www.')) url.hostname = host.slice(4);
+  else if (host.split('.').length <= 3) url.hostname = 'www.' + host;
+  else return;
+  return url.href;
+}
 export const captureUrl = (url: string, options: CaptureOptions = {}) => capture({ url }, options);
 /** Owned fixtures only. External resource access is blocked, including navigations. */
 export const captureHtml = (html: string, options: CaptureOptions = {}) =>
@@ -207,6 +224,8 @@ async function capture(
       assets: [],
       issues: [],
     };
+    // The address that answered; a later width starts from it.
+    let target = input.url ?? '';
     const captureWidth = async (width: number) => {
       const local = {
         assets: [] as SceneAsset[],
@@ -244,8 +263,40 @@ async function capture(
         if (input.html !== undefined)
           await page.setContent(input.html, { waitUntil: 'domcontentloaded', timeout: 12000 });
         else {
-          const response = await page
-            .goto(input.url!, { waitUntil: 'domcontentloaded', timeout: 35000 })
+          const open = (url: string) =>
+            page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+          const response = await open(target)
+            .catch(async (error: unknown) => {
+              // Many sites answer on only one of example.com and www.example.com, and a
+              // browser that visited before follows a remembered redirect. When the
+              // address as given does not answer at all, the other form is tried.
+              const other = alternateAddress(target);
+              if (!other || !UNREACHABLE.test(String((error as Error)?.message))) throw error;
+              await assertPublicUrl(other);
+              // The browser's own error page for the first address can still be
+              // arriving; it would interrupt the next navigation, so that one is repeated.
+              const result = await open(other)
+                .catch((second: unknown) => {
+                  if (!/interrupted by another navigation/.test(String((second as Error)?.message)))
+                    throw second;
+                  return page.waitForTimeout(300).then(() => open(other));
+                })
+                .catch((second: unknown) => {
+                  trace(
+                    'the other address failed too: ' +
+                      String((second as Error)?.message).slice(0, 160),
+                  );
+                  throw error;
+                });
+              target = other;
+              local.issues.push({
+                code: 'address-changed',
+                severity: 'info',
+                message: `${new URL(input.url!).host} did not answer; ${new URL(other).host} was captured instead.`,
+                screenId: `viewport-${width}`,
+              });
+              return result;
+            })
             .catch(async (error: unknown) => {
               // A slow site may have delivered its content while a late script still
               // blocks the load event. Continue with what is rendered instead of failing.
