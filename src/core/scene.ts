@@ -83,6 +83,8 @@ export type TextSpec = {
   maxLines?: number;
   /** Lines the browser laid the copy out on. */
   lines?: number;
+  /** Offsets in `characters` where the browser started each line after the first. */
+  breaks?: number[];
   resolvedFontFamily?: string;
   fontUsage?: FontUsage[];
   variationSettings?: Record<string, number>;
@@ -343,6 +345,14 @@ export function validateScene(input: unknown): ScenePackage {
     optional(t, 'sizing', (v, q) => en(v, q, ['inline', 'block']), p);
     optional(t, 'maxLines', (v, q) => integer(v, q, 1, 1000), p);
     optional(t, 'lines', (v, q) => integer(v, q, 1, 100000), p);
+    optional(
+      t,
+      'breaks',
+      (v, q) => {
+        for (const offset of arr(v, q, 2000)) integer(offset, q, 1, 100000);
+      },
+      p,
+    );
     fontProperties(t, p);
     optional(t, 'shadow', shadows, p);
     optional(

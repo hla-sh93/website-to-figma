@@ -670,6 +670,15 @@ export async function renderScene(
   };
   const huggers = new Set<string>();
   const oneLineTexts: { node: TextNode; lineHeight: number; width: number }[] = [];
+  // Copy that kept the browser's line breaks under a substituted font.
+  const keptBreaks = new Set<string>();
+  const brokenTexts: {
+    node: TextNode;
+    height: number;
+    lineHeight: number;
+    size: number;
+    spacing: number;
+  }[] = [];
   /** Makes the single-child chain under a shrink-wrapped box hug down to one line of copy. */
   const hugChain = (source: SceneNode, node: FrameNode, screenId: string): boolean => {
     const layout = layoutOf(source);
@@ -739,6 +748,18 @@ export async function renderScene(
         t.node.resize(Math.max(0.01, t.width), t.node.height);
       }
       oneLineTexts.length = 0;
+      // A substitute wider than the page's font pushes a kept line past its box, where
+      // it wraps again. Slightly tighter letter spacing (at most 4% of the size) brings
+      // the lines back; the text then leaves its shared style.
+      for (const t of brokenTexts.filter((t) => t.node.height > t.height + t.lineHeight / 2)) {
+        let fits = false;
+        for (let step = 1; step <= 4 && !fits; step++) {
+          t.node.letterSpacing = { unit: 'PIXELS', value: t.spacing - (t.size * step) / 100 };
+          fits = t.node.height <= t.height + t.lineHeight / 2;
+        }
+        if (!fits) t.node.letterSpacing = { unit: 'PIXELS', value: t.spacing };
+      }
+      brokenTexts.length = 0;
       screens.push(native.id);
       offset += screen.root.bounds.width + 80;
     }
@@ -862,7 +883,25 @@ export async function renderScene(
       // paragraph that starts with Latin text or punctuation needs an invisible RLM so
       // brackets, numbers and Latin runs are ordered as the browser showed them.
       const mark = rtlMark(text);
-      node.characters = mark + text.characters;
+      // A substituted font has other widths, so its lines would break elsewhere. The
+      // space that ended each browser line becomes a line separator: the same lines,
+      // the same character count (runs keep their offsets).
+      let characters = text.characters;
+      const substitute =
+        !fonts.resolutions.get(fontKey(text))!.exact ||
+        (text.runs ?? []).some(
+          (run) => !fonts.resolutions.get(fontKey(fontRequest(text, run)))!.exact,
+        );
+      if (substitute && text.breaks?.length && !text.maxLines) {
+        const letters = [...characters];
+        if (letters.length === characters.length) {
+          for (const offset of text.breaks)
+            if (letters[offset - 1] === ' ') letters[offset - 1] = '\u2028';
+          characters = letters.join('');
+          if (characters !== text.characters) keptBreaks.add(source.id);
+        }
+      }
+      node.characters = mark + characters;
       node.textDecoration = (text.textDecoration ?? 'none').toUpperCase() as TextDecoration;
       if (text.textCase) node.textCase = text.textCase.toUpperCase() as TextCase;
       const textEffects: Effect[] = (text.shadow ?? [])
@@ -1470,6 +1509,14 @@ export async function renderScene(
             node: native,
             lineHeight: source.text!.lineHeight,
             width: source.bounds.width,
+          });
+        if (keptBreaks.has(source.id) && native.textAutoResize === 'HEIGHT')
+          brokenTexts.push({
+            node: native,
+            height: source.bounds.height,
+            lineHeight: source.text!.lineHeight,
+            size: source.text!.fontSize,
+            spacing: source.text!.letterSpacing,
           });
         if (singleLine && positioned && native.width !== before) {
           // Keep the edge the browser aligned the line to.

@@ -905,3 +905,30 @@ test('text styles are named by use, and a second import reuses styles and colour
   assert.ok(first.stats.textStyles === 4 && second.stats.textStyles === 0);
   assert.equal(second.stats.variables, 0);
 });
+
+test('a substituted font keeps the line breaks of the browser; an available font does not need them', async () => {
+  const copy = (id: string, family: string) =>
+    node(id, {
+      kind: 'text',
+      position: 'flow',
+      bounds: { x: 0, y: 0, width: 120, height: 60 },
+      text: text('one two three four five six', {
+        fontFamily: family,
+        sizing: 'block',
+        lines: 3,
+        breaks: [8, 19],
+        runs: [{ start: 8, end: 13, fontFamily: family, fontStyle: 'normal', fontWeight: 400 }],
+      }),
+    });
+  const figma = createFakeFigma();
+  const result = await renderScene(
+    figma.api,
+    scene([copy('missing', 'Brand Sans'), copy('present', 'Inter')]),
+    { components: false, fontPolicy: 'substitute' },
+  );
+  const byId = (id: string) =>
+    figma.all.find((n) => n.id === result.mapping[`viewport-1440:${id}`])!;
+  assert.equal(byId('missing').characters, 'one two\u2028three four\u2028five six');
+  assert.equal(byId('missing').characters.length, 27);
+  assert.equal(byId('present').characters, 'one two three four five six');
+});

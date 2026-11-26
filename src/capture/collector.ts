@@ -586,6 +586,48 @@ export function collect(selector: string | undefined): {
     }
     return Math.max(1, lines);
   };
+  // Where the browser started each line, as offsets in the collected characters.
+  // Words are matched by the count of non-space characters before them, which does not
+  // depend on how white space was collapsed; text the page generates (pseudo-elements)
+  // makes the counts differ, and then no breaks are recorded.
+  const lineBreaks = (root: Node, characters: string, lines: number): { breaks?: number[] } => {
+    if (lines < 2 || characters.length > 6000) return {};
+    const nodes: Text[] = [];
+    if (root.nodeType === Node.TEXT_NODE) nodes.push(root as Text);
+    else {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+    }
+    const range = document.createRange();
+    const starts: number[] = [];
+    let inked = 0,
+      bottom = -Infinity,
+      started = false;
+    for (const node of nodes)
+      for (const word of node.data.matchAll(/\S+/g)) {
+        range.setStart(node, word.index);
+        range.setEnd(node, word.index + 1);
+        const rect = range.getClientRects()[0];
+        if (!rect || !rect.height) continue; // not rendered
+        if (started && rect.top >= bottom - rect.height / 2) starts.push(inked);
+        started = true;
+        bottom = Math.max(bottom, rect.bottom);
+        inked += word[0].length;
+      }
+    if (!starts.length || characters.replace(/\s/g, '').length !== inked) return {};
+    const breaks: number[] = [];
+    let seen = 0,
+      next = 0;
+    for (let i = 0; i < characters.length && next < starts.length; i++) {
+      if (/\s/.test(characters[i]!)) continue;
+      if (seen === starts[next]) {
+        breaks.push(i);
+        next++;
+      }
+      seen++;
+    }
+    return breaks.length === starts.length ? { breaks } : {};
+  };
   const measuredText = (el: Element, node: Node, id: string): SceneNode | null => {
     if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) return null;
     const c = getComputedStyle(el);
@@ -623,6 +665,7 @@ export function collect(selector: string | undefined): {
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: 'inline',
         lines: lineCount(range),
+        ...lineBreaks(node, characters, lineCount(range)),
         ...textCase(c),
         ...textShadow(c),
       },
@@ -1491,6 +1534,7 @@ export function collect(selector: string | undefined): {
         direction: c.direction === 'rtl' ? 'rtl' : 'ltr',
         sizing: intrinsicText ? 'inline' : 'block',
         lines: lineCount(textRange),
+        ...lineBreaks(el, characters, lineCount(textRange)),
         ...(c.textOverflow === 'ellipsis' && c.whiteSpace === 'nowrap' ? { maxLines: 1 } : {}),
         ...textCase(c),
         ...textShadow(c),

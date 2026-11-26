@@ -17,6 +17,8 @@ body{margin:0;font:16px Arial}
 </style></head><body>
 <div id="bar"><div id="logo"></div><div id="search"></div><div id="side"></div><div id="top"></div></div>
 <div id="hero">Ready</div>
+<p id="copy" style="width:200px;margin:0;font:16px/20px Arial">One two three four five six seven <b>eight nine</b> ten eleven twelve thirteen</p>
+<p id="short" style="width:200px;margin:0">One line</p>
 </body></html>`;
 
 const scene = await captureHtml(html, { widths: [800] });
@@ -49,4 +51,17 @@ test('colour custom properties are captured as named tokens', () => {
   assert.equal(Math.round(tokens['brand-accent']!.r * 255), 255);
   // "220 20% 96%" is read as hsl().
   assert.ok(tokens.surface!.r > 0.9 && tokens.surface!.b > tokens.surface!.r);
+});
+
+test('line breaks of the browser are recorded for copy on several lines', () => {
+  const copy = nodes.find((n) => n.text?.characters.startsWith('One two three'))!;
+  const text = copy.text!;
+  assert.ok(text.lines! >= 3);
+  assert.equal(text.breaks!.length, text.lines! - 1);
+  // Every break starts a word, right after the space that ended the line before.
+  for (const offset of text.breaks!) {
+    assert.equal(text.characters[offset - 1], ' ');
+    assert.match(text.characters[offset]!, /\S/);
+  }
+  assert.equal(nodes.find((n) => n.text?.characters === 'One line')!.text!.breaks, undefined);
 });
